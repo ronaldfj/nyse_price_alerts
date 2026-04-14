@@ -1,0 +1,3 @@
+on:
+  schedule:
+    - cron: "0 14,19 * * 1-5"  # 10am y 3pm EST aprox.
