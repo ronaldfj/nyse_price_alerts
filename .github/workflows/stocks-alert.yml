@@ -1,3 +1,47 @@
+name: Stock Price Alert S&P500
+
 on:
   schedule:
-    - cron: "0 14,19 * * 1-5"  # 10am y 3pm EST aprox.
+    # Se ejecuta a las 10:05 AM y 3:05 PM EST (Hora NY) de Lunes a Viernes
+    # UTC es NY +4 o +5 dependiendo del horario de verano. 
+    # Este cron es para las 14:05 y 20:05 UTC.
+    - cron: "5 14,20 * * 1-5"
+  workflow_dispatch: # Permite ejecutarlo manualmente para probar
+
+permissions:
+  contents: write
+
+jobs:
+  run-alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v5
+
+      - name: Instalar Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Asegurar archivo de estado
+        run: |
+          test -f stock_state.json || echo "{}" > stock_state.json
+
+      - name: Ejecutar script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python alert.py
+
+      - name: Guardar estado
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add stock_state.json
+          git diff --cached --quiet || git commit -m "Actualizar estado de acciones"
+          git push
