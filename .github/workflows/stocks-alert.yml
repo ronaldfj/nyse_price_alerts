@@ -3,10 +3,8 @@ name: Stock Price Alert S&P500
 on:
   schedule:
     # Se ejecuta a las 10:05 AM y 3:05 PM EST (Hora NY) de Lunes a Viernes
-    # UTC es NY +4 o +5 dependiendo del horario de verano. 
-    # Este cron es para las 14:05 y 20:05 UTC.
     - cron: "5 14,20 * * 1-5"
-  workflow_dispatch: # Permite ejecutarlo manualmente para probar
+  workflow_dispatch: # Esto permite que le des al botón "Run" manualmente
 
 permissions:
   contents: write
