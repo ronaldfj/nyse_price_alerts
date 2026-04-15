@@ -41,23 +41,31 @@ def mark_alerted(symbol):
 def evaluate_stock(symbol):
     ticker = yf.Ticker(symbol)
     
-    # Extraer el nombre de la empresa. Si falla, usa el ticker.
+    # 1. Intento de obtener nombre con manejo de Timeout
     try:
+        # Usamos un acceso rápido al nombre. Si Yahoo tarda > 10s, saltará al except.
         company_name = ticker.info.get('longName', symbol)
-    except:
+    except Exception:
+        print(f"Aviso: Timeout en info de {symbol}. Usando ticker como nombre.")
         company_name = symbol
 
-    df = ticker.history(period="1y", interval="1d") 
+    # 2. Obtención de histórico de precios
+    try:
+        df = ticker.history(period="1y", interval="1d")
+    except Exception as e:
+        print(f"Error crítico al obtener precios de {symbol}: {e}")
+        return None
     
-    if len(df) < 200: return None
+    if df.empty or len(df) < 200: 
+        return None
 
-    # Indicadores
-    df['ema20'] = df['Close'].ewm(span=20).mean()
-    df['ema200'] = df['Close'].ewm(span=200).mean()
+    # 3. Cálculo de Indicadores
+    df['ema20'] = df['Close'].ewm(span=20, adjust=False).mean()
+    df['ema200'] = df['Close'].ewm(span=200, adjust=False).mean()
     
     delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14).mean()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/14, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/14, adjust=False).mean()
     df['rsi'] = 100 - (100 / (1 + (gain / (loss + 1e-9))))
     
     df['tr'] = df['Close'].diff().abs()
@@ -71,6 +79,7 @@ def evaluate_stock(symbol):
     prev = df.iloc[-2]
     score, reasons = 0, []
 
+    # 4. Lógica de Puntuación
     if last['Close'] > last['ema200']: 
         score += 2.0; reasons.append("Tendencia Alcista (>EMA200)")
     if last['adx'] > 20: 
@@ -80,8 +89,11 @@ def evaluate_stock(symbol):
     if last['Close'] > last['ema20'] and prev['Close'] <= prev['ema20']:
         score += 1.0; reasons.append("Cruce de Media Rápida (EMA20)")
 
-    stop = last['Close'] - (last['atr'] * 2)
-    tp = last['Close'] + (last['atr'] * 4.5)
+    # 5. Gestión de Riesgo
+    # Evitamos división por cero si el ATR es nulo
+    current_atr = last['atr'] if last['atr'] > 0 else (last['Close'] * 0.02)
+    stop = last['Close'] - (current_atr * 2)
+    tp = last['Close'] + (current_atr * 4.5)
     rr = (tp - last['Close']) / (last['Close'] - stop)
 
     return {
@@ -98,16 +110,16 @@ def evaluate_stock(symbol):
 
 def main():
     state = load_state()
-    print("Escaneando mercado bursátil...")
+    print(f"--- Iniciando escaneo de {len(STOCKS)} activos ---")
     for symbol in STOCKS:
-        # Cooldown de 24h
+        # Cooldown de 24h para evitar spam
         last_alert = state.get(symbol, 0)
-        if (time.time() - last_alert) < 86400: continue
+        if (time.time() - last_alert) < 86400:
+            continue
         
         try:
             res = evaluate_stock(symbol)
             if res and res["alert"]:
-                # Mensaje con nombre completo
                 msg = (f"📈 *ALERTA BOLSA: {res['name']} ({res['symbol']})*\n\n"
                        f"💰 *Precio:* ${res['price']:.2f}\n"
                        f"📊 *Score:* {res['score']}\n"
@@ -117,10 +129,14 @@ def main():
                        f"📝 *Análisis:* {', '.join(res['reasons'])}")
                 send_telegram(msg)
                 mark_alerted(symbol)
-                print(f"Alerta enviada: {res['name']}")
-            # Pequeño delay para no saturar la API
-            time.sleep(1)
-        except Exception as e: print(f"Error {symbol}: {e}")
+                print(f"✅ Alerta enviada para {res['name']}")
+            else:
+                print(f"• {symbol}: Sin señal clara.")
+            
+            # Pausa para no saturar la conexión
+            time.sleep(1.5)
+        except Exception as e:
+            print(f"❌ Error procesando {symbol}: {e}")
 
 if __name__ == "__main__":
     main()
