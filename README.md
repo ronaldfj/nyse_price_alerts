@@ -40,21 +40,18 @@ cd TU_REPOSITORIO
 pip install -r requirements.txt
 python alert.py
 
----
-
-### 🤝 Contribuciones
-
+🤝 Contribuciones
 Este es un proyecto abierto y las colaboraciones son bienvenidas para fortalecer la robustez del bot. Para contribuir:
 
-1. **Fork del Proyecto:** Crea tu propia copia del repositorio.
-2. **Feature Branch:** Crea una rama para tu mejora (`git checkout -b feature/MejoraAnalisis`).
-3. **Commit de Seguridad:** Asegúrate de que tus cambios no expongan variables de entorno o archivos de estado (`.json`).
-4. **Pull Request:** Describe claramente los cambios y los indicadores técnicos ajustados.
+Fork del Proyecto: Crea tu propia copia del repositorio.
 
----
+Feature Branch: Crea una rama para tu mejora (git checkout -b feature/MejoraAnalisis).
 
-#$# ⚖️ Licencia
+Commit de Seguridad: Asegúrate de que tus cambios no expongan variables de entorno o archivos de estado (.json).
 
-Distribuido bajo la **Licencia MIT**. Esto permite que otros usen, copien y modifiquen el software libremente, siempre que se mantenga el aviso de copyright original, pero sin ofrecer ninguna garantía sobre los resultados financieros obtenidos (Descargo de responsabilidad).
+Pull Request: Describe claramente los cambios y los indicadores técnicos ajustados.
 
-*Nota: El uso de este bot es bajo tu propio riesgo. Los resultados pasados no garantizan rendimientos futuros.*
+⚖️ Licencia
+Distribuido bajo la Licencia MIT. Esto permite que otros usen, copien y modifiquen el software libremente, siempre que se mantenga el aviso de copyright original.
+
+Nota: El uso de este bot es bajo tu propio riesgo. Los resultados pasados no garantizan rendimientos futuros.
