@@ -40,7 +40,8 @@ cd TU_REPOSITORIO
 pip install -r requirements.txt
 python alert.py
 ```  
-🤝 Contribuciones
+### 🤝 Contribuciones
+
 Este es un proyecto abierto y las colaboraciones son bienvenidas para fortalecer la robustez del bot. Para contribuir:
 
 Fork del Proyecto: Crea tu propia copia del repositorio.
@@ -51,7 +52,7 @@ Commit de Seguridad: Asegúrate de que tus cambios no expongan variables de ento
 
 Pull Request: Describe claramente los cambios y los indicadores técnicos ajustados.
 
-⚖️ Licencia
+### ⚖️ Licencia
 Distribuido bajo la Licencia MIT. Esto permite que otros usen, copien y modifiquen el software libremente, siempre que se mantenga el aviso de copyright original.
 
 Nota: El uso de este bot es bajo tu propio riesgo. Los resultados pasados no garantizan rendimientos futuros.
