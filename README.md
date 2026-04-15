@@ -39,3 +39,44 @@ git clone [https://github.com/TU_USUARIO/TU_REPOSITORIO.git](https://github.com/
 cd TU_REPOSITORIO
 pip install -r requirements.txt
 python alert.py
+
+
+🤝 Contribuciones
+¡Las contribuciones son bienvenidas! Si tienes una idea para mejorar los indicadores o la eficiencia del bot:
+
+Haz un Fork del proyecto.
+
+Crea una rama para tu mejora (git checkout -b feature/MejoraTecnica).
+
+Realiza tus cambios y haz un Commit descriptivo.
+
+Envía un Pull Request.
+
+Nota: Por favor, asegúrate de que tus cambios no expongan datos sensibles y mantengan la compatibilidad con el sistema de retardos (delays) para evitar bloqueos de IP.
+
+⚖️ Licencia
+Distribuido bajo la Licencia MIT. Ver LICENSE para más información.
+
+
+---
+
+### Recomendaciones adicionales para tu repo:
+
+1.  **Archivo `requirements.txt`:** Crea este archivo en la raíz y pega esto:
+    ```text
+    pandas
+    yfinance
+    requests
+    ```
+2.  **Archivo `.gitignore`:** Es vital para tu seguridad y orden. Pega esto:
+    ```text
+    __pycache__/
+    *.json
+    .env
+    .DS_Store
+    ```
+    *Esto evitará que se suba el archivo `stock_state.json` o `crypto_state.json`, manteniendo tus logs de alertas privados.*
+
+3.  **Diferenciación:** En el README de **Cripto**, puedes mencionar que el cron corre cada 4 horas, mientras que en el de **Bolsa** puedes destacar que solo opera en días hábiles de mercado.
+
+¿Te gustaría que añadamos alguna sección específica sobre el análisis de **ADX 100** que vimos en tus capturas?
