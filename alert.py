@@ -102,7 +102,6 @@ def main():
     state = load_state()
     print("🚀 Iniciando escaneo de Bolsa...")
     for symbol in STOCKS:
-        print(f"Procesando {ticker}... RSI: {rsi_actual}, ADX: {adx_actual}")
         last_alert = state.get(symbol, 0)
         if (time.time() - last_alert) < 86400: continue
         
