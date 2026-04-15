@@ -40,6 +40,8 @@ cd TU_REPOSITORIO
 pip install -r requirements.txt
 python alert.py
 
+---
+
 ### 🤝 Contribuciones
 
 Este es un proyecto abierto y las colaboraciones son bienvenidas para fortalecer la robustez del bot. Para contribuir:
