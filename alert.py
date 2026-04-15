@@ -6,7 +6,7 @@ import pandas as pd
 import yfinance as yf
 import requests
 
-# ── Diccionario de Nombres (Evita errores de conexión con Yahoo) ──────────────
+# ── Configuración de Nombres ──────────────────────────────────────────────────
 STOCK_NAMES = {
     'AAPL': 'Apple Inc.', 'MSFT': 'Microsoft Corp.', 'NVDA': 'NVIDIA Corp.',
     'AMZN': 'Amazon.com Inc.', 'GOOGL': 'Alphabet Inc.', 'META': 'Meta Platforms',
@@ -43,19 +43,27 @@ def mark_alerted(symbol):
     state[symbol] = time.time()
     Path(STATE_FILE).write_text(json.dumps(state))
 
-# ── Análisis Técnico Robusto ──────────────────────────────────────────────────
+# ── Análisis Técnico con Camuflaje ────────────────────────────────────────────
 def evaluate_stock(symbol):
-    ticker = yf.Ticker(symbol)
+    # Configuramos una sesión con un User-Agent de navegador para evitar bloqueos
+    session = requests.Session()
+    session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'})
+    
+    ticker = yf.Ticker(symbol, session=session)
     company_name = STOCK_NAMES.get(symbol, symbol)
 
-    # Solo pedimos el historial, que es mucho más estable que el 'info'
-    try:
-        df = ticker.history(period="1y", interval="1d", timeout=20)
-    except Exception:
-        print(f"❌ Error de conexión con {symbol}. Saltando...")
-        return None
+    # Reintento automático si hay timeout
+    df = None
+    for i in range(2): # 2 intentos
+        try:
+            df = ticker.history(period="1y", interval="1d", timeout=15)
+            if not df.empty: break
+        except Exception:
+            print(f"⚠️ Reintento {i+1} para {symbol}...")
+            time.sleep(5)
     
-    if df.empty or len(df) < 200: 
+    if df is None or df.empty or len(df) < 200: 
+        print(f"❌ Imposible obtener datos de {symbol}")
         return None
 
     # Cálculo de Indicadores
@@ -100,7 +108,7 @@ def evaluate_stock(symbol):
 
 def main():
     state = load_state()
-    print(f"🚀 Escaneando {len(STOCKS)} acciones líderes...")
+    print(f"🚀 Iniciando escaneo blindado...")
     for symbol in STOCKS:
         last_alert = state.get(symbol, 0)
         if (time.time() - last_alert) < 86400: continue
@@ -117,12 +125,14 @@ def main():
                        f"📝 *Análisis:* {', '.join(res['reasons'])}")
                 send_telegram(msg)
                 mark_alerted(symbol)
-                print(f"✅ Alerta: {res['name']}")
+                print(f"✅ ¡Alerta enviada para {res['name']}!")
             else:
-                print(f"• {symbol}: Sin señal.")
-            time.sleep(2) # Delay para evitar bloqueos de IP
+                print(f"• {symbol}: Analizado sin señal.")
+            
+            # Pausa de 5 segundos entre acciones para pasar bajo el radar
+            time.sleep(5)
         except Exception as e:
-            print(f"❌ Error en {symbol}: {e}")
+            print(f"❌ Error saltado en {symbol}: {e}")
 
 if __name__ == "__main__":
     main()
