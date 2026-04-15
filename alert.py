@@ -6,11 +6,17 @@ import pandas as pd
 import yfinance as yf
 import requests
 
-# ── Configuración de Mercado ──────────────────────────────────────────────────
-STOCKS = [
-    'AAPL', 'MSFT', 'NVDA', 'AMZN', 'GOOGL', 'META', 'TSLA', 'BRK-B', 
-    'V', 'JPM', 'UNH', 'MA', 'AVGO', 'HD', 'PG', 'COST', 'SPY', 'QQQ'
-]
+# ── Diccionario de Nombres (Evita errores de conexión con Yahoo) ──────────────
+STOCK_NAMES = {
+    'AAPL': 'Apple Inc.', 'MSFT': 'Microsoft Corp.', 'NVDA': 'NVIDIA Corp.',
+    'AMZN': 'Amazon.com Inc.', 'GOOGL': 'Alphabet Inc.', 'META': 'Meta Platforms',
+    'TSLA': 'Tesla, Inc.', 'BRK-B': 'Berkshire Hathaway', 'V': 'Visa Inc.',
+    'JPM': 'JPMorgan Chase', 'UNH': 'UnitedHealth Group', 'MA': 'Mastercard Inc.',
+    'AVGO': 'Broadcom Inc.', 'HD': 'Home Depot Inc.', 'PG': 'Procter & Gamble',
+    'COST': 'Costco Wholesale', 'SPY': 'S&P 500 ETF', 'QQQ': 'Nasdaq 100 ETF'
+}
+
+STOCKS = list(STOCK_NAMES.keys())
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -37,29 +43,22 @@ def mark_alerted(symbol):
     state[symbol] = time.time()
     Path(STATE_FILE).write_text(json.dumps(state))
 
-# ── Análisis Técnico Institucional ───────────────────────────────────────────
+# ── Análisis Técnico Robusto ──────────────────────────────────────────────────
 def evaluate_stock(symbol):
     ticker = yf.Ticker(symbol)
-    
-    # 1. Intento de obtener nombre con manejo de Timeout
-    try:
-        # Usamos un acceso rápido al nombre. Si Yahoo tarda > 10s, saltará al except.
-        company_name = ticker.info.get('longName', symbol)
-    except Exception:
-        print(f"Aviso: Timeout en info de {symbol}. Usando ticker como nombre.")
-        company_name = symbol
+    company_name = STOCK_NAMES.get(symbol, symbol)
 
-    # 2. Obtención de histórico de precios
+    # Solo pedimos el historial, que es mucho más estable que el 'info'
     try:
-        df = ticker.history(period="1y", interval="1d")
-    except Exception as e:
-        print(f"Error crítico al obtener precios de {symbol}: {e}")
+        df = ticker.history(period="1y", interval="1d", timeout=20)
+    except Exception:
+        print(f"❌ Error de conexión con {symbol}. Saltando...")
         return None
     
     if df.empty or len(df) < 200: 
         return None
 
-    # 3. Cálculo de Indicadores
+    # Cálculo de Indicadores
     df['ema20'] = df['Close'].ewm(span=20, adjust=False).mean()
     df['ema200'] = df['Close'].ewm(span=200, adjust=False).mean()
     
@@ -79,7 +78,6 @@ def evaluate_stock(symbol):
     prev = df.iloc[-2]
     score, reasons = 0, []
 
-    # 4. Lógica de Puntuación
     if last['Close'] > last['ema200']: 
         score += 2.0; reasons.append("Tendencia Alcista (>EMA200)")
     if last['adx'] > 20: 
@@ -89,33 +87,23 @@ def evaluate_stock(symbol):
     if last['Close'] > last['ema20'] and prev['Close'] <= prev['ema20']:
         score += 1.0; reasons.append("Cruce de Media Rápida (EMA20)")
 
-    # 5. Gestión de Riesgo
-    # Evitamos división por cero si el ATR es nulo
     current_atr = last['atr'] if last['atr'] > 0 else (last['Close'] * 0.02)
     stop = last['Close'] - (current_atr * 2)
     tp = last['Close'] + (current_atr * 4.5)
     rr = (tp - last['Close']) / (last['Close'] - stop)
 
     return {
-        "symbol": symbol, 
-        "name": company_name, 
-        "score": score, 
-        "rr": rr, 
-        "price": last['Close'], 
-        "stop": stop, 
-        "tp": tp, 
-        "alert": score >= MIN_SCORE and rr >= MIN_RR, 
-        "reasons": reasons
+        "symbol": symbol, "name": company_name, "score": score, 
+        "rr": rr, "price": last['Close'], "stop": stop, "tp": tp, 
+        "alert": score >= MIN_SCORE and rr >= MIN_RR, "reasons": reasons
     }
 
 def main():
     state = load_state()
-    print(f"--- Iniciando escaneo de {len(STOCKS)} activos ---")
+    print(f"🚀 Escaneando {len(STOCKS)} acciones líderes...")
     for symbol in STOCKS:
-        # Cooldown de 24h para evitar spam
         last_alert = state.get(symbol, 0)
-        if (time.time() - last_alert) < 86400:
-            continue
+        if (time.time() - last_alert) < 86400: continue
         
         try:
             res = evaluate_stock(symbol)
@@ -129,14 +117,12 @@ def main():
                        f"📝 *Análisis:* {', '.join(res['reasons'])}")
                 send_telegram(msg)
                 mark_alerted(symbol)
-                print(f"✅ Alerta enviada para {res['name']}")
+                print(f"✅ Alerta: {res['name']}")
             else:
-                print(f"• {symbol}: Sin señal clara.")
-            
-            # Pausa para no saturar la conexión
-            time.sleep(1.5)
+                print(f"• {symbol}: Sin señal.")
+            time.sleep(2) # Delay para evitar bloqueos de IP
         except Exception as e:
-            print(f"❌ Error procesando {symbol}: {e}")
+            print(f"❌ Error en {symbol}: {e}")
 
 if __name__ == "__main__":
     main()
