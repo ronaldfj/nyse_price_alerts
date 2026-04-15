@@ -40,7 +40,7 @@ cd TU_REPOSITORIO
 pip install -r requirements.txt
 python alert.py
 
-## 🤝 Contribuciones
+### 🤝 Contribuciones
 
 Este es un proyecto abierto y las colaboraciones son bienvenidas para fortalecer la robustez del bot. Para contribuir:
 
@@ -51,7 +51,7 @@ Este es un proyecto abierto y las colaboraciones son bienvenidas para fortalecer
 
 ---
 
-## ⚖️ Licencia
+#$# ⚖️ Licencia
 
 Distribuido bajo la **Licencia MIT**. Esto permite que otros usen, copien y modifiquen el software libremente, siempre que se mantenga el aviso de copyright original, pero sin ofrecer ninguna garantía sobre los resultados financieros obtenidos (Descargo de responsabilidad).
 
