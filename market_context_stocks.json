@@ -1,0 +1,31 @@
+{
+  "_instrucciones": "Actualiza este archivo manualmente cada semana según tu lectura del mercado. GLOBAL aplica a todas las acciones. Por símbolo sobreescribe solo lo que necesites.",
+
+  "GLOBAL": {
+    "caution_level": "NORMAL",
+    "score_adjustment": 0.0,
+    "note": ""
+  },
+
+  "_ejemplos_de_uso": {
+    "semana_de_fed": {
+      "GLOBAL": {
+        "caution_level": "HIGH",
+        "score_adjustment": -0.5,
+        "note": "Semana de decisión Fed — reducir exposición"
+      }
+    },
+    "accion_con_earnings": {
+      "NVDA": {
+        "hard_block_long": true,
+        "note": "Earnings el 28 May — no abrir posiciones"
+      }
+    },
+    "accion_en_soporte_clave": {
+      "AAPL": {
+        "score_adjustment": 0.5,
+        "note": "Rebotando en soporte $210 — sesgo positivo"
+      }
+    }
+  }
+}
