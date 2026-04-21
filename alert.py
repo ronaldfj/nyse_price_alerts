@@ -894,6 +894,7 @@ def main() -> None:
                 )
             elif sig.should_alert:
                 if send_telegram(format_alert(sig, vix)):
+                    append_alert_history(sig, vix)
                     state[sig.symbol] = now
                     save_state(state)
                     stats["alerts"] += 1
