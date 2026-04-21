@@ -15,11 +15,13 @@ Iteración 1.4 aplicada:
   - Gestión de riesgo diferenciada por playbook
   - Breakout más permisivo para tendencias fuertes
   - DRY_RUN para pruebas sin Telegram
+  - Persistencia opcional de alertas a CSV histórico
 """
 
 from __future__ import annotations
 
 import json
+import csv
 import logging
 import os
 import time
@@ -89,6 +91,7 @@ STOCKS = list(STOCK_NAMES.keys())
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 STATE_FILE = os.getenv("STOCK_STATE_FILE", "stock_state.json")
+ALERTS_HISTORY_FILE = os.getenv("ALERTS_HISTORY_FILE", "alerts_history.csv")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 MIN_SCORE = float(os.getenv("MIN_SCORE", "5.8"))
@@ -200,6 +203,44 @@ def save_state(state: dict) -> None:
         Path(STATE_FILE).write_text(json.dumps(state, indent=2))
     except Exception as exc:
         log.error("Guardando estado: %s", exc)
+
+
+def append_alert_history(sig: StockSignal, vix: Optional[float]) -> None:
+    history_path = Path(ALERTS_HISTORY_FILE)
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+
+    row = {
+        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "symbol": sig.symbol,
+        "name": sig.name,
+        "group": sig.group,
+        "playbook": sig.signal_type,
+        "price": round(sig.price, 4),
+        "target": round(sig.tp, 4),
+        "stop": round(sig.stop, 4),
+        "rr": round(sig.rr, 4),
+        "score": round(sig.score, 4),
+        "regime_score": round(sig.regime_score, 4),
+        "setup_score": round(sig.setup_score, 4),
+        "trigger_score": round(sig.trigger_score, 4),
+        "atr": round(sig.atr, 4),
+        "adx": round(sig.adx, 4),
+        "rsi": round(sig.rsi, 4),
+        "rs20": round(sig.rs20, 4),
+        "extension_pct": round(sig.extension_pct, 4),
+        "vix": round(vix, 4) if vix is not None else "",
+        "earnings_date": sig.earnings_date,
+        "reasons": " | ".join(sig.reasons),
+        "warnings": " | ".join(sig.warnings),
+        "blocked": " | ".join(sig.blocked),
+    }
+
+    file_exists = history_path.exists() and history_path.stat().st_size > 0
+    with history_path.open("a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 # ── Contexto macro manual ─────────────────────────────────────────────────────
@@ -801,6 +842,7 @@ def main() -> None:
 
     mode = "DRY RUN" if DRY_RUN else "PRODUCCIÓN"
     log.info("Iniciando escaneo v2 [%s] — %s acciones", mode, len(STOCKS))
+    log.info("Histórico CSV: %s", ALERTS_HISTORY_FILE)
 
     vix = fetch_vix()
     if vix is not None:
