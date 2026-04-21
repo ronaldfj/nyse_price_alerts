@@ -1,58 +1,59 @@
-# 📈 Market Sentinel Bot
+# 📈 Stock Sentinel Bot v2
 
-![Python](https://img.shields.io/badge/python-3.9+-blue.svg)
-![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Status](https://img.shields.io/badge/status-active-brightgreen.svg)
+Refactor de la estrategia de alertas para acciones con foco en entradas más limpias y menos falsos positivos.
 
-Sistema automatizado de vigilancia de mercados financieros que utiliza **Análisis Técnico Institucional** para identificar señales de alta probabilidad. El bot opera 100% en la nube mediante GitHub Actions y envía alertas en tiempo real vía Telegram.
+## Qué cambia
 
-## 🧠 Estrategia de Trading
-El bot no busca movimientos al azar; filtra activos basándose en una confluencia de indicadores:
+- **Score por capas**: `regime + setup + trigger`
+- **R:R estructural real**: stop por swing low + ATR buffer
+- **Filtro de pendiente**: EMA200 ascendente
+- **Relative Strength**: comparación simple vs `SPY` a 20 sesiones
+- **Contexto manual real**: usa `market_context_stocks.json` por defecto
+- **Workflow corregido**: cron con timezone y `concurrency`
 
-* **Tendencia Institucional:** Precio superior a la EMA 200 (Filtro de sesgo alcista).
-* **Fuerza de Tendencia:** ADX > 20 para confirmar que existe momentum real.
-* **Momento de Entrada:** RSI optimizado (45-65) con pendiente ascendente.
-* **Gestión de Riesgo:** Solo se emiten alertas con un Ratio Riesgo:Beneficio (R:R) mínimo de 2.0.
+## Lógica resumida
 
-## 🚀 Características Técnicas
-* **Ejecución Serverless:** Programado con GitHub Actions (Cron).
-* **Anti-Blocking:** Implementa User-Agents y retardos inteligentes para asegurar la disponibilidad de datos.
-* **Persistence:** Gestión de estado vía JSON para evitar spam de alertas duplicadas.
+### Regime
+Valida sesgo alcista de fondo:
+- `Close > EMA200`
+- `EMA50 > EMA200`
+- `EMA200 slope > 0`
+- `ADX >= 18` y `DI+ > DI-`
 
-## 🛠️ Configuración e Instalación
+### Setup
+Busca estructura operable:
+- distancia razonable a `EMA20`
+- `RSI` en rango 45–65 o recuperando
+- `EMA20 > EMA50`
+- fuerza relativa positiva contra `SPY`
 
-### 1. Requisitos Previos
-* Python 3.9 o superior.
-* Un Bot de Telegram (creado vía @BotFather).
+### Trigger
+Busca momento de entrada:
+- ruptura de máximo reciente o reclaim de `EMA20`
+- mejora de `MACD histogram`
+- volumen relativo suficiente
 
-### 2. Variables de Entorno (GitHub Secrets)
-Para proteger la seguridad del sistema, no se utilizan archivos de configuración locales para credenciales. Debes configurar los siguientes **Secrets** en tu repositorio de GitHub:
+## Variables de entorno recomendadas
 
-| Secreto | Descripción |
-| :--- | :--- |
-| `TELEGRAM_BOT_TOKEN` | El Token API de tu bot de Telegram. |
-| `TELEGRAM_CHAT_ID` | El ID numérico del chat o grupo de destino. |
+- `MIN_SCORE=6.0`
+- `MIN_RR=1.9`
+- `COOLDOWN_HOURS=48`
+- `TRIGGER_VOL_RATIO=1.4`
+- `SETUP_RSI_MIN=45`
+- `SETUP_RSI_MAX=65`
+- `RS_LOOKBACK=20`
+- `SWING_LOOKBACK=12`
 
-### 3. Instalación Local (para pruebas)
-```bash
-git clone [https://github.com/TU_USUARIO/TU_REPOSITORIO.git](https://github.com/TU_USUARIO/TU_REPOSITORIO.git)
-cd TU_REPOSITORIO
-pip install -r requirements.txt
-python alert.py
-```  
-### 🤝 Contribuciones
+## Archivos clave
 
-Este es un proyecto abierto y las colaboraciones son bienvenidas para fortalecer la robustez del bot. Para contribuir:
+- `alert_v2.py`
+- `stocks-alert-v2.yml`
+- `requirements-v2.txt`
+- `market_context_stocks.json`
 
-Fork del Proyecto: Crea tu propia copia del repositorio.
+## Siguiente iteración sugerida
 
-Feature Branch: Crea una rama para tu mejora (git checkout -b feature/MejoraAnalisis).
-
-Commit de Seguridad: Asegúrate de que tus cambios no expongan variables de entorno o archivos de estado (.json).
-
-Pull Request: Describe claramente los cambios y los indicadores técnicos ajustados.
-
-### ⚖️ Licencia
-Distribuido bajo la Licencia MIT. Esto permite que otros usen, copien y modifiquen el software libremente, siempre que se mantenga el aviso de copyright original.
-
-Nota: El uso de este bot es bajo tu propio riesgo. Los resultados pasados no garantizan rendimientos futuros.
+Llevar la arquitectura a **multi-timeframe**:
+- Diario para regime
+- 60m para setup
+- 15m para trigger
