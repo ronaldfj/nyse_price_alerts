@@ -404,14 +404,15 @@ def main():
         f"Alertas:{stats['alerts']}"
     )
 
-    # Resumen por Telegram si hubo alertas
-    if stats["alerts"] > 0 and not DRY_RUN:
+    # Resumen final siempre por Telegram
+    if not DRY_RUN:
         send_telegram(
             f"📋 *Resumen escaneo bolsa*\n\n"
             f"✅ Alertas enviadas: {stats['alerts']}\n"
             f"○ Sin señal: {stats['no_signal']}\n"
             f"⚠️ Bloqueadas: {stats['blocked']}\n"
-            f"💤 En cooldown: {stats['cooldown']}"
+            f"💤 En cooldown: {stats['cooldown']}\n"
+            f"❌ Sin datos: {stats['no_data']}"
         )
 
 
