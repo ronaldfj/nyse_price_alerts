@@ -46,9 +46,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MARKET_CONTEXT_FILE: market_context_stocks.json
           STOCK_STATE_FILE: stock_state.json
-          MIN_SCORE: "5.6"
-          MIN_RR: "1.4"
-          COOLDOWN_HOURS: "0"
           EARNINGS_BUFFER_DAYS: "5"
           VIX_BLOCK_LEVEL: "30"
           VIX_CAUTION_LEVEL: "22"
@@ -58,6 +55,12 @@ jobs:
           BREAKOUT_MAX_ATR: "3.20"
           RS_LOOKBACK: "20"
           SWING_LOOKBACK: "12"
+          FINAL_RS_MIN: "0.0"
+          ALERT_ETFS: "false"
+          REQUIRE_PLAYBOOK: "true"
+          MIN_SCORE: "5.8"
+          MIN_RR: "1.3"
+          COOLDOWN_HOURS: "0"
         run: python alert.py
 
       - name: Guardar estado
