@@ -1,6 +1,6 @@
 """
 Stock Sentinel Bot — Alertas técnicas para NYSE/Nasdaq
-Iteración 1.1 aplicada:
+Iteración 1.2 aplicada:
   - Score por capas: regime / setup / trigger
   - Hard blocks solo para riesgo real
   - Warnings / penalizaciones para setup subóptimo
@@ -11,6 +11,9 @@ Iteración 1.1 aplicada:
   - Soporte a market_context_stocks.json por defecto
   - Uso real de caution_level desde market_context
   - Logging más claro para debugging y tuning
+  - Earnings omitidos para ETFs (SPY/QQQ)
+  - Gestión de riesgo diferenciada por playbook
+  - Breakout más permisivo para tendencias fuertes
   - DRY_RUN para pruebas sin Telegram
 """
 
@@ -94,15 +97,17 @@ COOLDOWN = int(os.getenv("COOLDOWN_HOURS", "48")) * 3600
 EARNINGS_BUFFER_DAYS = int(os.getenv("EARNINGS_BUFFER_DAYS", "5"))
 VIX_BLOCK_LEVEL = float(os.getenv("VIX_BLOCK_LEVEL", "30.0"))
 VIX_CAUTION_LEVEL = float(os.getenv("VIX_CAUTION_LEVEL", "22.0"))
-TRIGGER_VOL_RATIO = float(os.getenv("TRIGGER_VOL_RATIO", "1.15"))
+TRIGGER_VOL_RATIO = float(os.getenv("TRIGGER_VOL_RATIO", "1.00"))
 SETUP_RSI_MIN = float(os.getenv("SETUP_RSI_MIN", "45"))
 SETUP_RSI_MAX = float(os.getenv("SETUP_RSI_MAX", "66"))
-BREAKOUT_RSI_MAX = float(os.getenv("BREAKOUT_RSI_MAX", "74"))
+BREAKOUT_RSI_MAX = float(os.getenv("BREAKOUT_RSI_MAX", "76"))
 RS_LOOKBACK = int(os.getenv("RS_LOOKBACK", "20"))
 SWING_LOOKBACK = int(os.getenv("SWING_LOOKBACK", "12"))
 PULLBACK_MAX_ATR = float(os.getenv("PULLBACK_MAX_ATR", "1.20"))
-BREAKOUT_MAX_ATR = float(os.getenv("BREAKOUT_MAX_ATR", "2.20"))
+BREAKOUT_MAX_ATR = float(os.getenv("BREAKOUT_MAX_ATR", "3.20"))
 WEAK_ADX_BLOCK = float(os.getenv("WEAK_ADX_BLOCK", "15.0"))
+BREAKOUT_RS_MIN = float(os.getenv("BREAKOUT_RS_MIN", "-0.5"))
+BREAKOUT_NEAR_PCT = float(os.getenv("BREAKOUT_NEAR_PCT", "0.995"))
 
 DEFAULT_CONTEXT_CANDIDATES = (
     os.getenv("MARKET_CONTEXT_FILE", ""),
@@ -250,6 +255,9 @@ def fetch_vix() -> Optional[float]:
 
 
 def get_earnings_info(symbol: str) -> tuple[Optional[str], bool]:
+    if STOCK_GROUPS.get(symbol) == "ETF":
+        return None, False
+
     try:
         ticker = yf.Ticker(symbol)
         earnings_date = None
@@ -352,6 +360,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # Máximos / mínimos recientes
     df["prior_high_5"] = df["High"].shift(1).rolling(5).max()
     df["prior_high_20"] = df["High"].shift(1).rolling(20).max()
+    df["prior_low_5"] = df["Low"].shift(1).rolling(5).min()
     df["prior_low_12"] = df["Low"].shift(1).rolling(SWING_LOOKBACK).min()
     df["prior_low_20"] = df["Low"].shift(1).rolling(20).min()
 
@@ -423,9 +432,18 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     plus_di = float(last["plus_di"])
     minus_di = float(last["minus_di"])
     vol_ratio = float(last["vol_ratio"])
-    extension_pct = ((entry - float(last["ema200"])) / max(float(last["ema200"]), 1e-9)) * 100
-    pullback_atr = abs(entry - float(last["ema20"])) / max(atr, 1e-9)
+    ema20 = float(last["ema20"])
+    ema50 = float(last["ema50"])
+    ema200 = float(last["ema200"])
+    extension_pct = ((entry - ema200) / max(ema200, 1e-9)) * 100
+    pullback_atr = abs(entry - ema20) / max(atr, 1e-9)
     rs20 = 0.0 if symbol == "SPY" else compute_relative_strength(df, spy_df)
+
+    prior_high_5 = float(last["prior_high_5"]) if pd.notna(last["prior_high_5"]) else entry
+    prior_high_20 = float(last["prior_high_20"]) if pd.notna(last["prior_high_20"]) else entry + 2.0 * atr
+    prior_low_5 = float(last["prior_low_5"]) if pd.notna(last["prior_low_5"]) else entry - 1.2 * atr
+    prior_swing_low = float(last["prior_low_12"]) if pd.notna(last["prior_low_12"]) else entry - 1.8 * atr
+    prior_low_20 = float(last["prior_low_20"]) if pd.notna(last["prior_low_20"]) else prior_swing_low
 
     # ── Bloqueos duros ────────────────────────────────────────────────────────
     if earnings_near and earnings_date_str:
@@ -455,11 +473,11 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         )
 
     # ── Regime ────────────────────────────────────────────────────────────────
-    if entry > float(last["ema200"]):
+    if entry > ema200:
         regime_score += 1.0
         reasons.append("Precio > EMA200")
 
-    if float(last["ema50"]) > float(last["ema200"]):
+    if ema50 > ema200:
         regime_score += 0.75
         reasons.append("EMA50 > EMA200")
 
@@ -485,11 +503,11 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         setup_score += 0.2
         reasons.append("Precio muy cerca de EMA20")
     elif pullback_atr <= BREAKOUT_MAX_ATR:
-        setup_score -= 0.2
+        setup_score -= 0.15
         warnings.append(f"Lejos de EMA20 para pullback ({pullback_atr:.2f} ATR)")
     else:
-        setup_score -= 0.8
-        warnings.append(f"Demasiado extendido vs EMA20 ({pullback_atr:.2f} ATR)")
+        setup_score -= 0.45
+        warnings.append(f"Muy extendido vs EMA20 ({pullback_atr:.2f} ATR)")
 
     if SETUP_RSI_MIN <= rsi <= SETUP_RSI_MAX and rsi >= prev_rsi:
         setup_score += 1.0
@@ -504,10 +522,10 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         setup_score -= 0.5
         warnings.append(f"RSI fuera de zona ideal ({rsi:.1f})")
 
-    if float(last["ema20"]) > float(last["ema50"]) and float(last["ema20_slope_3"]) > 0:
+    if ema20 > ema50 and float(last["ema20_slope_3"]) > 0:
         setup_score += 0.8
         reasons.append("EMA20 > EMA50 con pendiente positiva")
-    elif entry > float(last["ema50"]):
+    elif entry > ema50:
         setup_score += 0.4
         reasons.append("Precio sostiene EMA50")
     else:
@@ -529,9 +547,10 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
             warnings.append(f"RS negativa vs SPY: {rs20:+.2f}%")
 
     # ── Trigger base ──────────────────────────────────────────────────────────
-    broke_prior_high_5 = entry > float(last["prior_high_5"])
-    broke_prior_high_20 = entry > float(last["prior_high_20"])
-    bullish_reclaim = entry > float(last["ema20"]) and float(prev["Close"]) <= float(prev["ema20"])
+    broke_prior_high_5 = entry > prior_high_5
+    broke_prior_high_20 = entry > prior_high_20
+    near_breakout = entry >= prior_high_20 * BREAKOUT_NEAR_PCT
+    bullish_reclaim = entry > ema20 and float(prev["Close"]) <= float(prev["ema20"])
     positive_momentum = float(last["macd_hist"]) > float(prev["macd_hist"])
 
     if broke_prior_high_5:
@@ -540,6 +559,9 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     elif bullish_reclaim:
         trigger_score += 0.5
         reasons.append("Reclaim sobre EMA20")
+    elif near_breakout:
+        trigger_score += 0.35
+        reasons.append("Cerca de ruptura del máximo de 20 sesiones")
 
     if positive_momentum and float(last["macd_hist"]) > 0:
         trigger_score += 0.8
@@ -560,22 +582,22 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
 
     # ── Playbooks ─────────────────────────────────────────────────────────────
     is_pullback = (
-        entry > float(last["ema200"])
-        and float(last["ema50"]) > float(last["ema200"])
-        and float(last["ema20"]) > float(last["ema50"])
+        entry > ema200
+        and ema50 > ema200
+        and ema20 > ema50
         and 0.15 <= pullback_atr <= PULLBACK_MAX_ATR
         and SETUP_RSI_MIN <= rsi <= max(SETUP_RSI_MAX, 68)
         and adx >= 18
     )
 
     is_breakout = (
-        broke_prior_high_20
-        and vol_ratio >= 1.05
-        and rs20 >= 0
+        (broke_prior_high_20 or near_breakout)
+        and vol_ratio >= 1.00
+        and rs20 >= BREAKOUT_RS_MIN
         and adx >= 20
         and rsi <= BREAKOUT_RSI_MAX
         and pullback_atr <= BREAKOUT_MAX_ATR
-        and entry > float(last["ema50"])
+        and entry > ema50
     )
 
     if is_pullback:
@@ -603,24 +625,38 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     if context_note:
         reasons.append(f"Contexto: {context_note}")
 
-    # ── Gestión de riesgo estructural ─────────────────────────────────────────
-    prior_swing_low = float(last["prior_low_12"]) if pd.notna(last["prior_low_12"]) else entry - 1.8 * atr
-    prior_low_20 = float(last["prior_low_20"]) if pd.notna(last["prior_low_20"]) else prior_swing_low
-    prior_high_20 = float(last["prior_high_20"]) if pd.notna(last["prior_high_20"]) else entry + 1.6 * atr
+    # ── Gestión de riesgo por playbook ────────────────────────────────────────
+    range_20 = max(prior_high_20 - prior_low_20, 1.4 * atr)
 
-    atr_stop = entry - 1.8 * atr
-    structural_stop = min(prior_swing_low - 0.20 * atr, atr_stop)
-    stop = min(entry - 0.25 * atr, structural_stop)
+    if signal_type in ("breakout", "hybrid"):
+        breakout_pivot = max(prior_high_5, prior_high_20 * BREAKOUT_NEAR_PCT)
+        raw_stop = max(breakout_pivot - 0.60 * atr, entry - 1.25 * atr)
+        stop = min(raw_stop, entry - 0.20 * atr)
 
-    risk = entry - stop
-    if risk <= 0:
-        blocked.append("Riesgo inválido: stop no consistente")
-        stop = entry - 1.8 * atr
         risk = entry - stop
+        measured_move = max(1.10 * range_20, 2.2 * atr, 1.7 * risk)
+        tp = entry + measured_move
 
-    range_20 = max(prior_high_20 - prior_low_20, 1.2 * atr)
-    tp_structural = max(prior_high_20 + 0.25 * atr, entry + 0.80 * range_20, entry + 1.35 * atr)
-    tp = tp_structural
+    elif signal_type == "pullback":
+        raw_stop = min(prior_swing_low - 0.25 * atr, ema50 - 0.30 * atr, entry - 1.40 * atr)
+        stop = min(raw_stop, entry - 0.25 * atr)
+
+        risk = entry - stop
+        tp = max(prior_high_20 + 0.20 * atr, entry + 1.8 * risk, entry + 2.0 * atr)
+
+    else:
+        raw_stop = min(prior_swing_low - 0.20 * atr, entry - 1.60 * atr)
+        stop = min(raw_stop, entry - 0.25 * atr)
+
+        risk = entry - stop
+        tp = max(entry + 1.5 * risk, entry + 1.8 * atr)
+
+    if stop >= entry:
+        blocked.append("Riesgo inválido: stop no consistente")
+        stop = entry - 1.4 * atr
+        risk = entry - stop
+        tp = entry + 1.8 * risk
+
     rr = (tp - entry) / max(risk, 1e-9)
 
     return StockSignal(
@@ -666,7 +702,7 @@ def format_alert(sig: StockSignal, vix: Optional[float]) -> str:
         warnings_block = "\n⚠️ *Warnings:*\n" + "\n".join(f"  • {warn}" for warn in sig.warnings[:4])
 
     return (
-        f"{score_emoji} *ALERTA BOLSA v2.1: {sig.name} ({sig.symbol})*\n\n"
+        f"{score_emoji} *ALERTA BOLSA v2.2: {sig.name} ({sig.symbol})*\n\n"
         f"💰 *Precio:* ${sig.price:.2f}\n"
         f"📊 *Score:* {sig.score:.1f}\n"
         f"⚖️ *R:R estructural:* {sig.rr:.2f}x\n"
