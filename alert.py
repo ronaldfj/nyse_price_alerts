@@ -1,6 +1,6 @@
 """
 Stock Sentinel Bot — Alertas técnicas para NYSE/Nasdaq
-Iteración 1.2 aplicada:
+Iteración 1.3 aplicada:
   - Score por capas: regime / setup / trigger
   - Hard blocks solo para riesgo real
   - Warnings / penalizaciones para setup subóptimo
@@ -108,6 +108,9 @@ BREAKOUT_MAX_ATR = float(os.getenv("BREAKOUT_MAX_ATR", "3.20"))
 WEAK_ADX_BLOCK = float(os.getenv("WEAK_ADX_BLOCK", "15.0"))
 BREAKOUT_RS_MIN = float(os.getenv("BREAKOUT_RS_MIN", "-0.5"))
 BREAKOUT_NEAR_PCT = float(os.getenv("BREAKOUT_NEAR_PCT", "0.995"))
+FINAL_RS_MIN = float(os.getenv("FINAL_RS_MIN", "0.0"))
+ALERT_ETFS = os.getenv("ALERT_ETFS", "false").lower() == "true"
+REQUIRE_PLAYBOOK = os.getenv("REQUIRE_PLAYBOOK", "true").lower() == "true"
 
 DEFAULT_CONTEXT_CANDIDATES = (
     os.getenv("MARKET_CONTEXT_FILE", ""),
@@ -143,7 +146,17 @@ class StockSignal:
 
     @property
     def should_alert(self) -> bool:
-        return self.score >= MIN_SCORE and self.rr >= MIN_RR and not self.blocked
+        playbook_ok = self.signal_type in {"pullback", "breakout", "hybrid"} or not REQUIRE_PLAYBOOK
+        benchmark_ok = ALERT_ETFS or self.group != "ETF"
+        rs_ok = self.group == "ETF" or self.rs20 >= FINAL_RS_MIN
+        return (
+            self.score >= MIN_SCORE
+            and self.rr >= MIN_RR
+            and not self.blocked
+            and playbook_ok
+            and benchmark_ok
+            and rs_ok
+        )
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -611,6 +624,7 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         reasons.append("Playbook activo: Breakout Expansion")
 
     if signal_type == "none":
+        setup_score -= 1.0
         warnings.append("No encaja limpio en pullback ni breakout")
 
     # ── Ajustes de contexto ───────────────────────────────────────────────────
@@ -626,36 +640,56 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         reasons.append(f"Contexto: {context_note}")
 
     # ── Gestión de riesgo por playbook ────────────────────────────────────────
-    range_20 = max(prior_high_20 - prior_low_20, 1.4 * atr)
+    range_20 = max(prior_high_20 - prior_low_20, 1.2 * atr)
+    dist_to_high20 = max(prior_high_20 - entry, 0.0)
 
     if signal_type in ("breakout", "hybrid"):
-        breakout_pivot = max(prior_high_5, prior_high_20 * BREAKOUT_NEAR_PCT)
-        raw_stop = max(breakout_pivot - 0.60 * atr, entry - 1.25 * atr)
+        raw_stop = max(prior_high_5 - 0.55 * atr, ema20 - 0.45 * atr, entry - 1.35 * atr)
         stop = min(raw_stop, entry - 0.20 * atr)
 
         risk = entry - stop
-        measured_move = max(1.10 * range_20, 2.2 * atr, 1.7 * risk)
-        tp = entry + measured_move
+        tp_candidates = [
+            prior_high_20 + 0.35 * atr,
+            entry + 0.90 * range_20,
+            entry + 1.80 * atr,
+        ]
+        if dist_to_high20 > 0:
+            tp_candidates.append(prior_high_20 + 0.25 * atr)
+        tp = max(tp_candidates)
 
     elif signal_type == "pullback":
-        raw_stop = min(prior_swing_low - 0.25 * atr, ema50 - 0.30 * atr, entry - 1.40 * atr)
-        stop = min(raw_stop, entry - 0.25 * atr)
+        raw_stop = min(prior_swing_low - 0.20 * atr, ema50 - 0.20 * atr, entry - 0.95 * atr)
+        stop = min(raw_stop, entry - 0.20 * atr)
 
         risk = entry - stop
-        tp = max(prior_high_20 + 0.20 * atr, entry + 1.8 * risk, entry + 2.0 * atr)
+        tp_candidates = [
+            prior_high_20 + 0.15 * atr,
+            entry + 1.40 * atr,
+        ]
+        if dist_to_high20 > 0:
+            tp_candidates.append(prior_high_20 + 0.10 * atr)
+        tp = max(tp_candidates)
 
     else:
-        raw_stop = min(prior_swing_low - 0.20 * atr, entry - 1.60 * atr)
-        stop = min(raw_stop, entry - 0.25 * atr)
+        raw_stop = min(prior_swing_low - 0.15 * atr, ema50 - 0.25 * atr, entry - 1.20 * atr)
+        stop = min(raw_stop, entry - 0.20 * atr)
 
         risk = entry - stop
-        tp = max(entry + 1.5 * risk, entry + 1.8 * atr)
+        tp = max(prior_high_20, entry + 1.20 * atr, entry + 1.10 * max(dist_to_high20, atr))
+
+    min_risk = max(0.35 * atr, entry * 0.003)
+    if risk < min_risk:
+        stop = entry - min_risk
+        risk = min_risk
 
     if stop >= entry:
         blocked.append("Riesgo inválido: stop no consistente")
-        stop = entry - 1.4 * atr
+        stop = entry - max(1.10 * atr, entry * 0.004)
         risk = entry - stop
-        tp = entry + 1.8 * risk
+
+    if tp <= entry:
+        blocked.append("Target inválido: TP no consistente")
+        tp = entry + max(1.40 * atr, 0.80 * range_20)
 
     rr = (tp - entry) / max(risk, 1e-9)
 
@@ -702,7 +736,7 @@ def format_alert(sig: StockSignal, vix: Optional[float]) -> str:
         warnings_block = "\n⚠️ *Warnings:*\n" + "\n".join(f"  • {warn}" for warn in sig.warnings[:4])
 
     return (
-        f"{score_emoji} *ALERTA BOLSA v2.2: {sig.name} ({sig.symbol})*\n\n"
+        f"{score_emoji} *ALERTA BOLSA v2.3: {sig.name} ({sig.symbol})*\n\n"
         f"💰 *Precio:* ${sig.price:.2f}\n"
         f"📊 *Score:* {sig.score:.1f}\n"
         f"⚖️ *R:R estructural:* {sig.rr:.2f}x\n"
