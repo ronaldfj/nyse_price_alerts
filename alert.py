@@ -1,6 +1,6 @@
 """
 Stock Sentinel Bot — Alertas técnicas para NYSE/Nasdaq
-Iteración 1.3 aplicada:
+Iteración 1.4 aplicada:
   - Score por capas: regime / setup / trigger
   - Hard blocks solo para riesgo real
   - Warnings / penalizaciones para setup subóptimo
@@ -594,37 +594,66 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         warnings.append(f"Volumen flojo ({vol_ratio:.2f}x)")
 
     # ── Playbooks ─────────────────────────────────────────────────────────────
+    pullback_trend_strong = entry > ema200 and ema50 > ema200 and ema20 > ema50 and adx >= 18
+    breakout_structure = (
+        broke_prior_high_20
+        or near_breakout
+        or (
+            broke_prior_high_5
+            and positive_momentum
+            and trigger_score >= 1.6
+            and entry >= prior_high_20 * 0.985
+        )
+    )
+
     is_pullback = (
-        entry > ema200
-        and ema50 > ema200
-        and ema20 > ema50
+        pullback_trend_strong
         and 0.15 <= pullback_atr <= PULLBACK_MAX_ATR
         and SETUP_RSI_MIN <= rsi <= max(SETUP_RSI_MAX, 68)
-        and adx >= 18
     )
 
     is_breakout = (
-        (broke_prior_high_20 or near_breakout)
-        and vol_ratio >= 1.00
+        breakout_structure
+        and vol_ratio >= 0.95
         and rs20 >= BREAKOUT_RS_MIN
-        and adx >= 20
+        and adx >= 18
         and rsi <= BREAKOUT_RSI_MAX
         and pullback_atr <= BREAKOUT_MAX_ATR
         and entry > ema50
     )
 
+    # Playbook híbrido: expansión temprana sobre tendencia, aunque no esté aún en 20D high limpio.
+    is_hybrid = (
+        not is_breakout
+        and not is_pullback
+        and entry > ema200
+        and ema50 > ema200
+        and entry > ema50
+        and broke_prior_high_5
+        and positive_momentum
+        and trigger_score >= 1.8
+        and adx >= 18
+        and rsi <= BREAKOUT_RSI_MAX
+        and pullback_atr <= BREAKOUT_MAX_ATR
+        and rs20 >= max(BREAKOUT_RS_MIN, -0.25)
+    )
+
     if is_pullback:
         signal_type = "pullback"
-        setup_score += 1.2
+        setup_score += 1.0
         reasons.append("Playbook activo: Pullback Continuation")
 
     if is_breakout:
         signal_type = "breakout" if signal_type == "none" else "hybrid"
-        trigger_score += 1.4
+        trigger_score += 1.2
         reasons.append("Playbook activo: Breakout Expansion")
+    elif is_hybrid:
+        signal_type = "hybrid"
+        trigger_score += 0.9
+        reasons.append("Playbook activo: Early Expansion / Hybrid")
 
     if signal_type == "none":
-        setup_score -= 1.0
+        setup_score -= 0.7
         warnings.append("No encaja limpio en pullback ni breakout")
 
     # ── Ajustes de contexto ───────────────────────────────────────────────────
@@ -642,54 +671,57 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     # ── Gestión de riesgo por playbook ────────────────────────────────────────
     range_20 = max(prior_high_20 - prior_low_20, 1.2 * atr)
     dist_to_high20 = max(prior_high_20 - entry, 0.0)
+    measured_move = max(0.75 * range_20, 1.6 * atr)
 
-    if signal_type in ("breakout", "hybrid"):
-        raw_stop = max(prior_high_5 - 0.55 * atr, ema20 - 0.45 * atr, entry - 1.35 * atr)
-        stop = min(raw_stop, entry - 0.20 * atr)
-
+    if signal_type == "breakout":
+        raw_stop = max(prior_high_5 - 0.30 * atr, ema20 - 0.35 * atr, entry - 0.95 * atr)
+        stop = min(raw_stop, entry - 0.12 * atr)
         risk = entry - stop
-        tp_candidates = [
-            prior_high_20 + 0.35 * atr,
-            entry + 0.90 * range_20,
-            entry + 1.80 * atr,
-        ]
-        if dist_to_high20 > 0:
-            tp_candidates.append(prior_high_20 + 0.25 * atr)
-        tp = max(tp_candidates)
+        tp = max(
+            prior_high_20 + 0.20 * atr,
+            entry + measured_move,
+            entry + 1.25 * risk,
+        )
+
+    elif signal_type == "hybrid":
+        raw_stop = max(prior_low_5 - 0.20 * atr, ema20 - 0.45 * atr, entry - 1.05 * atr)
+        stop = min(raw_stop, entry - 0.15 * atr)
+        risk = entry - stop
+        tp = max(
+            prior_high_20 + 0.15 * atr,
+            entry + max(0.60 * range_20, 1.5 * atr),
+            entry + 1.20 * risk,
+        )
 
     elif signal_type == "pullback":
-        raw_stop = min(prior_swing_low - 0.20 * atr, ema50 - 0.20 * atr, entry - 0.95 * atr)
-        stop = min(raw_stop, entry - 0.20 * atr)
-
+        raw_stop = min(prior_swing_low - 0.12 * atr, ema50 - 0.12 * atr, entry - 0.80 * atr)
+        stop = min(raw_stop, entry - 0.15 * atr)
         risk = entry - stop
-        tp_candidates = [
-            prior_high_20 + 0.15 * atr,
-            entry + 1.40 * atr,
-        ]
-        if dist_to_high20 > 0:
-            tp_candidates.append(prior_high_20 + 0.10 * atr)
-        tp = max(tp_candidates)
+        tp = max(
+            prior_high_20 + 0.10 * atr,
+            entry + max(0.55 * range_20, 1.3 * atr),
+            entry + 1.15 * risk,
+        )
 
     else:
-        raw_stop = min(prior_swing_low - 0.15 * atr, ema50 - 0.25 * atr, entry - 1.20 * atr)
-        stop = min(raw_stop, entry - 0.20 * atr)
-
+        raw_stop = min(prior_swing_low - 0.10 * atr, ema50 - 0.15 * atr, entry - 0.90 * atr)
+        stop = min(raw_stop, entry - 0.15 * atr)
         risk = entry - stop
-        tp = max(prior_high_20, entry + 1.20 * atr, entry + 1.10 * max(dist_to_high20, atr))
+        tp = max(entry + 1.00 * atr, prior_high_20)
 
-    min_risk = max(0.35 * atr, entry * 0.003)
+    min_risk = max(0.22 * atr, entry * 0.002)
     if risk < min_risk:
         stop = entry - min_risk
         risk = min_risk
 
     if stop >= entry:
         blocked.append("Riesgo inválido: stop no consistente")
-        stop = entry - max(1.10 * atr, entry * 0.004)
+        stop = entry - max(0.90 * atr, entry * 0.003)
         risk = entry - stop
 
     if tp <= entry:
         blocked.append("Target inválido: TP no consistente")
-        tp = entry + max(1.40 * atr, 0.80 * range_20)
+        tp = entry + max(1.20 * atr, 0.60 * range_20)
 
     rr = (tp - entry) / max(risk, 1e-9)
 
