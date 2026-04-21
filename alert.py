@@ -16,6 +16,7 @@ Iteración 1.4 aplicada:
   - Breakout más permisivo para tendencias fuertes
   - DRY_RUN para pruebas sin Telegram
   - Persistencia opcional de alertas a CSV histórico
+  - Tracker automático de outcomes: open / hit_target / hit_stop / expired
 """
 
 from __future__ import annotations
@@ -114,12 +115,52 @@ BREAKOUT_NEAR_PCT = float(os.getenv("BREAKOUT_NEAR_PCT", "0.995"))
 FINAL_RS_MIN = float(os.getenv("FINAL_RS_MIN", "0.0"))
 ALERT_ETFS = os.getenv("ALERT_ETFS", "false").lower() == "true"
 REQUIRE_PLAYBOOK = os.getenv("REQUIRE_PLAYBOOK", "true").lower() == "true"
+TRACKER_MAX_BARS_OPEN = int(os.getenv("TRACKER_MAX_BARS_OPEN", "15"))
+TRACKER_ENABLED = os.getenv("TRACKER_ENABLED", "true").lower() == "true"
 
 DEFAULT_CONTEXT_CANDIDATES = (
     os.getenv("MARKET_CONTEXT_FILE", ""),
     "market_context_stocks.json",
     "market_context.json",
 )
+
+ALERT_HISTORY_COLUMNS = [
+    "timestamp_utc",
+    "symbol",
+    "name",
+    "group",
+    "playbook",
+    "price",
+    "target",
+    "stop",
+    "rr",
+    "score",
+    "regime_score",
+    "setup_score",
+    "trigger_score",
+    "atr",
+    "adx",
+    "rsi",
+    "rs20",
+    "extension_pct",
+    "vix",
+    "earnings_date",
+    "reasons",
+    "warnings",
+    "blocked",
+    "status",
+    "last_checked_utc",
+    "bars_open",
+    "days_open",
+    "current_price",
+    "pnl_pct",
+    "mfe_pct",
+    "mae_pct",
+    "exit_date",
+    "exit_price",
+    "exit_reason",
+    "closed_utc",
+]
 
 
 # ── Dataclass de señal ────────────────────────────────────────────────────────
@@ -205,42 +246,288 @@ def save_state(state: dict) -> None:
         log.error("Guardando estado: %s", exc)
 
 
+
+def _parse_iso_datetime(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        if value in ("", None):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _fmt_csv_number(value: object, digits: int = 4) -> str:
+    if value in ("", None):
+        return ""
+    try:
+        return f"{float(value):.{digits}f}"
+    except Exception:
+        return str(value)
+
+
+def load_alert_history_rows() -> list[dict[str, str]]:
+    path = Path(ALERTS_HISTORY_FILE)
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        rows = []
+        for row in reader:
+            normalized = {col: row.get(col, "") for col in ALERT_HISTORY_COLUMNS}
+            rows.append(normalized)
+        return rows
+
+
+def save_alert_history_rows(rows: list[dict[str, str]]) -> None:
+    path = Path(ALERTS_HISTORY_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=ALERT_HISTORY_COLUMNS)
+        writer.writeheader()
+        for row in rows:
+            normalized = {col: row.get(col, "") for col in ALERT_HISTORY_COLUMNS}
+            writer.writerow(normalized)
+
+
+def ensure_alert_history_schema() -> None:
+    path = Path(ALERTS_HISTORY_FILE)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not path.exists() or path.stat().st_size == 0:
+        return
+
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        current_columns = reader.fieldnames or []
+        rows = list(reader)
+
+    if current_columns == ALERT_HISTORY_COLUMNS:
+        return
+
+    normalized_rows = [{col: row.get(col, "") for col in ALERT_HISTORY_COLUMNS} for row in rows]
+    save_alert_history_rows(normalized_rows)
+    log.info("Histórico CSV migrado a esquema tracker: %s", ALERTS_HISTORY_FILE)
+
+
 def append_alert_history(sig: StockSignal, vix: Optional[float]) -> None:
     history_path = Path(ALERTS_HISTORY_FILE)
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
+    now_utc = datetime.now(timezone.utc).isoformat()
     row = {
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        "timestamp_utc": now_utc,
         "symbol": sig.symbol,
         "name": sig.name,
         "group": sig.group,
         "playbook": sig.signal_type,
-        "price": round(sig.price, 4),
-        "target": round(sig.tp, 4),
-        "stop": round(sig.stop, 4),
-        "rr": round(sig.rr, 4),
-        "score": round(sig.score, 4),
-        "regime_score": round(sig.regime_score, 4),
-        "setup_score": round(sig.setup_score, 4),
-        "trigger_score": round(sig.trigger_score, 4),
-        "atr": round(sig.atr, 4),
-        "adx": round(sig.adx, 4),
-        "rsi": round(sig.rsi, 4),
-        "rs20": round(sig.rs20, 4),
-        "extension_pct": round(sig.extension_pct, 4),
-        "vix": round(vix, 4) if vix is not None else "",
+        "price": _fmt_csv_number(sig.price),
+        "target": _fmt_csv_number(sig.tp),
+        "stop": _fmt_csv_number(sig.stop),
+        "rr": _fmt_csv_number(sig.rr),
+        "score": _fmt_csv_number(sig.score),
+        "regime_score": _fmt_csv_number(sig.regime_score),
+        "setup_score": _fmt_csv_number(sig.setup_score),
+        "trigger_score": _fmt_csv_number(sig.trigger_score),
+        "atr": _fmt_csv_number(sig.atr),
+        "adx": _fmt_csv_number(sig.adx),
+        "rsi": _fmt_csv_number(sig.rsi),
+        "rs20": _fmt_csv_number(sig.rs20),
+        "extension_pct": _fmt_csv_number(sig.extension_pct),
+        "vix": _fmt_csv_number(vix) if vix is not None else "",
         "earnings_date": sig.earnings_date,
         "reasons": " | ".join(sig.reasons),
         "warnings": " | ".join(sig.warnings),
         "blocked": " | ".join(sig.blocked),
+        "status": "open",
+        "last_checked_utc": now_utc,
+        "bars_open": "0",
+        "days_open": "0",
+        "current_price": _fmt_csv_number(sig.price),
+        "pnl_pct": "0.0000",
+        "mfe_pct": "0.0000",
+        "mae_pct": "0.0000",
+        "exit_date": "",
+        "exit_price": "",
+        "exit_reason": "",
+        "closed_utc": "",
     }
 
     file_exists = history_path.exists() and history_path.stat().st_size > 0
     with history_path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+        writer = csv.DictWriter(handle, fieldnames=ALERT_HISTORY_COLUMNS)
         if not file_exists:
             writer.writeheader()
         writer.writerow(row)
+
+
+def _prepare_closed_tracker_bars(df: Optional[pd.DataFrame], opened_dt: datetime) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    closed_df = df.copy()
+    if len(closed_df) >= 2:
+        closed_df = closed_df.iloc[:-1]
+
+    if closed_df.empty:
+        return pd.DataFrame()
+
+    opened_date = opened_dt.date()
+    mask = pd.Index([ts.date() >= opened_date for ts in closed_df.index])
+    return closed_df.loc[mask].copy()
+
+
+def update_alert_history_tracker() -> dict[str, int]:
+    stats = {
+        "open_checked": 0,
+        "hit_target": 0,
+        "hit_stop": 0,
+        "expired": 0,
+        "still_open": 0,
+        "invalid": 0,
+    }
+
+    if not TRACKER_ENABLED:
+        return stats
+
+    rows = load_alert_history_rows()
+    if not rows:
+        return stats
+
+    now_utc = datetime.now(timezone.utc).isoformat()
+    data_cache: dict[str, Optional[pd.DataFrame]] = {}
+    changed = False
+
+    for row in rows:
+        status = (row.get("status") or "open").strip().lower()
+        if status in {"hit_target", "hit_stop", "expired"}:
+            continue
+
+        stats["open_checked"] += 1
+
+        symbol = (row.get("symbol") or "").strip()
+        entry = _safe_float(row.get("price"))
+        target = _safe_float(row.get("target"))
+        stop = _safe_float(row.get("stop"))
+        opened_dt = _parse_iso_datetime(row.get("timestamp_utc", ""))
+
+        if not symbol or entry <= 0 or target <= 0 or stop <= 0 or opened_dt is None:
+            row["status"] = "invalid"
+            row["last_checked_utc"] = now_utc
+            stats["invalid"] += 1
+            changed = True
+            continue
+
+        if symbol not in data_cache:
+            data_cache[symbol] = fetch_data(symbol)
+
+        trade_df = _prepare_closed_tracker_bars(data_cache[symbol], opened_dt)
+        if trade_df.empty:
+            row["status"] = "open"
+            row["last_checked_utc"] = now_utc
+            row["bars_open"] = "0"
+            row["days_open"] = "0"
+            row["current_price"] = _fmt_csv_number(entry)
+            row["pnl_pct"] = "0.0000"
+            row["mfe_pct"] = "0.0000"
+            row["mae_pct"] = "0.0000"
+            changed = True
+            stats["still_open"] += 1
+            continue
+
+        highs = trade_df["High"].astype(float)
+        lows = trade_df["Low"].astype(float)
+        closes = trade_df["Close"].astype(float)
+
+        bars_open = int(len(trade_df))
+        days_open = int((trade_df.index[-1].date() - opened_dt.date()).days)
+        current_price = float(closes.iloc[-1])
+        mfe_pct = ((float(highs.max()) - entry) / max(entry, 1e-9)) * 100.0
+        mae_pct = ((float(lows.min()) - entry) / max(entry, 1e-9)) * 100.0
+
+        exit_status = "open"
+        exit_price = None
+        exit_date = ""
+        exit_reason = ""
+
+        for idx, bar in trade_df.iterrows():
+            bar_low = float(bar["Low"])
+            bar_high = float(bar["High"])
+
+            hit_stop = bar_low <= stop
+            hit_target = bar_high >= target
+
+            if hit_stop and hit_target:
+                exit_status = "hit_stop"
+                exit_price = stop
+                exit_date = idx.date().isoformat()
+                exit_reason = "same_bar_both_hit_stop_first"
+                break
+            if hit_stop:
+                exit_status = "hit_stop"
+                exit_price = stop
+                exit_date = idx.date().isoformat()
+                exit_reason = "stop_hit"
+                break
+            if hit_target:
+                exit_status = "hit_target"
+                exit_price = target
+                exit_date = idx.date().isoformat()
+                exit_reason = "target_hit"
+                break
+
+        if exit_status == "open" and bars_open >= TRACKER_MAX_BARS_OPEN:
+            exit_status = "expired"
+            exit_price = current_price
+            exit_date = trade_df.index[-1].date().isoformat()
+            exit_reason = f"time_stop_{TRACKER_MAX_BARS_OPEN}_bars"
+
+        row["status"] = exit_status
+        row["last_checked_utc"] = now_utc
+        row["bars_open"] = str(bars_open)
+        row["days_open"] = str(days_open)
+        row["current_price"] = _fmt_csv_number(current_price)
+        row["mfe_pct"] = _fmt_csv_number(mfe_pct)
+        row["mae_pct"] = _fmt_csv_number(mae_pct)
+
+        if exit_status == "open":
+            row["pnl_pct"] = _fmt_csv_number(((current_price - entry) / max(entry, 1e-9)) * 100.0)
+            row["exit_date"] = ""
+            row["exit_price"] = ""
+            row["exit_reason"] = ""
+            row["closed_utc"] = ""
+            stats["still_open"] += 1
+        else:
+            realized_pnl_pct = ((float(exit_price) - entry) / max(entry, 1e-9)) * 100.0
+            row["pnl_pct"] = _fmt_csv_number(realized_pnl_pct)
+            row["exit_date"] = exit_date
+            row["exit_price"] = _fmt_csv_number(exit_price)
+            row["exit_reason"] = exit_reason
+            row["closed_utc"] = now_utc
+
+            if exit_status == "hit_target":
+                stats["hit_target"] += 1
+            elif exit_status == "hit_stop":
+                stats["hit_stop"] += 1
+            elif exit_status == "expired":
+                stats["expired"] += 1
+
+        changed = True
+
+    if changed:
+        save_alert_history_rows(rows)
+
+    return stats
 
 
 # ── Contexto macro manual ─────────────────────────────────────────────────────
@@ -840,9 +1127,23 @@ def main() -> None:
     context = load_market_context()
     now = time.time()
 
+    ensure_alert_history_schema()
+
     mode = "DRY RUN" if DRY_RUN else "PRODUCCIÓN"
     log.info("Iniciando escaneo v2 [%s] — %s acciones", mode, len(STOCKS))
     log.info("Histórico CSV: %s", ALERTS_HISTORY_FILE)
+
+    tracker_stats = update_alert_history_tracker()
+    if tracker_stats["open_checked"] > 0:
+        log.info(
+            "Tracker histórico | Revisadas:%s | Target:%s | Stop:%s | Expiradas:%s | Abiertas:%s | Inválidas:%s",
+            tracker_stats["open_checked"],
+            tracker_stats["hit_target"],
+            tracker_stats["hit_stop"],
+            tracker_stats["expired"],
+            tracker_stats["still_open"],
+            tracker_stats["invalid"],
+        )
 
     vix = fetch_vix()
     if vix is not None:
