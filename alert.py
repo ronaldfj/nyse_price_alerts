@@ -76,7 +76,7 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 STATE_FILE         = os.getenv("STOCK_STATE_FILE", "stock_state.json")
 DRY_RUN            = os.getenv("DRY_RUN", "false").lower() == "true"
 
-MIN_SCORE  = float(os.getenv("MIN_SCORE", "4.5"))   # sobre ~8.5 máximo posible
+MIN_SCORE  = float(os.getenv("MIN_SCORE", "6"))   # sobre ~8.5 máximo posible
 MIN_RR     = float(os.getenv("MIN_RR", "1.8"))       # más realista que 2.0 para diario
 COOLDOWN   = int(os.getenv("COOLDOWN_HOURS", "48")) * 3600  # 48h para diario
 
