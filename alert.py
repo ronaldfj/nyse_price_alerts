@@ -1,6 +1,7 @@
+
 """
 Stock Sentinel Bot — Alertas técnicas para NYSE/Nasdaq
-Iteración 1.4 aplicada:
+Iteración 1.5:
   - Score por capas: regime / setup / trigger
   - Hard blocks solo para riesgo real
   - Warnings / penalizaciones para setup subóptimo
@@ -10,19 +11,17 @@ Iteración 1.4 aplicada:
   - Relative strength simple vs SPY (20 sesiones)
   - Soporte a market_context_stocks.json por defecto
   - Uso real de caution_level desde market_context
-  - Logging más claro para debugging y tuning
-  - Earnings omitidos para ETFs (SPY/QQQ)
-  - Gestión de riesgo diferenciada por playbook
-  - Breakout más permisivo para tendencias fuertes
   - DRY_RUN para pruebas sin Telegram
   - Persistencia opcional de alertas a CSV histórico
   - Tracker automático de outcomes: open / hit_target / hit_stop / expired
+  - Idempotencia por setup_hash + fallback de cooldown desde CSV
 """
 
 from __future__ import annotations
 
-import json
 import csv
+import hashlib
+import json
 import logging
 import os
 import time
@@ -85,7 +84,6 @@ STOCK_GROUPS = {
     "SPY": "ETF",
     "QQQ": "ETF",
 }
-
 STOCKS = list(STOCK_NAMES.keys())
 
 # ── Configuración ─────────────────────────────────────────────────────────────
@@ -117,6 +115,7 @@ ALERT_ETFS = os.getenv("ALERT_ETFS", "false").lower() == "true"
 REQUIRE_PLAYBOOK = os.getenv("REQUIRE_PLAYBOOK", "true").lower() == "true"
 TRACKER_MAX_BARS_OPEN = int(os.getenv("TRACKER_MAX_BARS_OPEN", "15"))
 TRACKER_ENABLED = os.getenv("TRACKER_ENABLED", "true").lower() == "true"
+HISTORY_COOLDOWN_FALLBACK = os.getenv("HISTORY_COOLDOWN_FALLBACK", "true").lower() == "true"
 
 DEFAULT_CONTEXT_CANDIDATES = (
     os.getenv("MARKET_CONTEXT_FILE", ""),
@@ -126,6 +125,9 @@ DEFAULT_CONTEXT_CANDIDATES = (
 
 ALERT_HISTORY_COLUMNS = [
     "timestamp_utc",
+    "trigger_candle_utc",
+    "setup_key",
+    "setup_hash",
     "symbol",
     "name",
     "group",
@@ -174,6 +176,7 @@ class StockSignal:
     tp: float
     stop: float
     atr: float
+    trigger_candle_utc: str
     rsi: float = 0.0
     adx: float = 0.0
     group: str = "Other"
@@ -246,7 +249,6 @@ def save_state(state: dict) -> None:
         log.error("Guardando estado: %s", exc)
 
 
-
 def _parse_iso_datetime(value: str) -> Optional[datetime]:
     if not value:
         return None
@@ -272,6 +274,31 @@ def _fmt_csv_number(value: object, digits: int = 4) -> str:
         return f"{float(value):.{digits}f}"
     except Exception:
         return str(value)
+
+
+def _normalize_dt_text(ts: datetime) -> str:
+    return ts.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "+00:00")
+
+
+def _price_bucket(value: float) -> str:
+    return f"{round(float(value), 2):.2f}"
+
+
+def build_setup_key(sig: StockSignal) -> str:
+    return "|".join(
+        [
+            sig.symbol,
+            sig.signal_type,
+            sig.trigger_candle_utc,
+            _price_bucket(sig.price),
+            _price_bucket(sig.tp),
+            _price_bucket(sig.stop),
+        ]
+    )
+
+
+def build_setup_hash(sig: StockSignal) -> str:
+    return hashlib.sha256(build_setup_key(sig).encode("utf-8")).hexdigest()
 
 
 def load_alert_history_rows() -> list[dict[str, str]]:
@@ -300,6 +327,25 @@ def save_alert_history_rows(rows: list[dict[str, str]]) -> None:
             writer.writerow(normalized)
 
 
+def _compute_legacy_setup_fields(row: dict[str, str]) -> tuple[str, str]:
+    symbol = (row.get("symbol") or "").strip()
+    playbook = (row.get("playbook") or "none").strip() or "none"
+    trigger_candle_utc = (row.get("trigger_candle_utc") or "").strip()
+    price = _price_bucket(_safe_float(row.get("price")))
+    target = _price_bucket(_safe_float(row.get("target")))
+    stop = _price_bucket(_safe_float(row.get("stop")))
+
+    # Si el CSV viejo no traía trigger_candle_utc, deduplicamos por setup económico
+    # para colapsar reenvíos repetidos del mismo trade aunque el timestamp_utc cambie.
+    if trigger_candle_utc:
+        setup_key = "|".join([symbol, playbook, trigger_candle_utc, price, target, stop])
+    else:
+        setup_key = "|".join([symbol, playbook, price, target, stop])
+
+    setup_hash = hashlib.sha256(setup_key.encode("utf-8")).hexdigest() if setup_key else ""
+    return setup_key, setup_hash
+
+
 def ensure_alert_history_schema() -> None:
     path = Path(ALERTS_HISTORY_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -312,12 +358,33 @@ def ensure_alert_history_schema() -> None:
         current_columns = reader.fieldnames or []
         rows = list(reader)
 
-    if current_columns == ALERT_HISTORY_COLUMNS:
-        return
+    normalized_rows = []
+    seen_hashes: set[str] = set()
+    duplicates_removed = 0
 
-    normalized_rows = [{col: row.get(col, "") for col in ALERT_HISTORY_COLUMNS} for row in rows]
-    save_alert_history_rows(normalized_rows)
-    log.info("Histórico CSV migrado a esquema tracker: %s", ALERTS_HISTORY_FILE)
+    for row in rows:
+        normalized = {col: row.get(col, "") for col in ALERT_HISTORY_COLUMNS}
+        if not normalized.get("trigger_candle_utc"):
+            normalized["trigger_candle_utc"] = normalized.get("timestamp_utc", "")
+        if not normalized.get("setup_key") or not normalized.get("setup_hash"):
+            setup_key, setup_hash = _compute_legacy_setup_fields(normalized)
+            normalized["setup_key"] = setup_key
+            normalized["setup_hash"] = setup_hash
+
+        setup_hash = normalized.get("setup_hash", "")
+        if setup_hash and setup_hash in seen_hashes:
+            duplicates_removed += 1
+            continue
+        if setup_hash:
+            seen_hashes.add(setup_hash)
+        normalized_rows.append(normalized)
+
+    if current_columns != ALERT_HISTORY_COLUMNS or duplicates_removed:
+        save_alert_history_rows(normalized_rows)
+        if current_columns != ALERT_HISTORY_COLUMNS:
+            log.info("Histórico CSV migrado a esquema tracker+dedupe: %s", ALERTS_HISTORY_FILE)
+        if duplicates_removed:
+            log.info("Histórico CSV depurado: %s duplicados exactos eliminados", duplicates_removed)
 
 
 def append_alert_history(sig: StockSignal, vix: Optional[float]) -> None:
@@ -325,8 +392,13 @@ def append_alert_history(sig: StockSignal, vix: Optional[float]) -> None:
     history_path.parent.mkdir(parents=True, exist_ok=True)
 
     now_utc = datetime.now(timezone.utc).isoformat()
+    setup_key = build_setup_key(sig)
+    setup_hash = build_setup_hash(sig)
     row = {
         "timestamp_utc": now_utc,
+        "trigger_candle_utc": sig.trigger_candle_utc,
+        "setup_key": setup_key,
+        "setup_hash": setup_hash,
         "symbol": sig.symbol,
         "name": sig.name,
         "group": sig.group,
@@ -363,12 +435,42 @@ def append_alert_history(sig: StockSignal, vix: Optional[float]) -> None:
         "closed_utc": "",
     }
 
-    file_exists = history_path.exists() and history_path.stat().st_size > 0
-    with history_path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=ALERT_HISTORY_COLUMNS)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
+    rows = load_alert_history_rows()
+    if any((r.get("setup_hash") or "") == setup_hash for r in rows):
+        log.info("🛡️ Histórico: setup ya existe, no se vuelve a guardar (%s %s)", sig.symbol, sig.signal_type)
+        return
+
+    rows.append(row)
+    save_alert_history_rows(rows)
+
+
+def has_exact_duplicate(sig: StockSignal, rows: list[dict[str, str]]) -> bool:
+    setup_hash = build_setup_hash(sig)
+    return any((row.get("setup_hash") or "") == setup_hash for row in rows)
+
+
+def recent_history_timestamp(symbol: str, rows: list[dict[str, str]]) -> float:
+    latest = 0.0
+    for row in rows:
+        if (row.get("symbol") or "").strip() != symbol:
+            continue
+        dt = _parse_iso_datetime(row.get("timestamp_utc", ""))
+        if dt is None:
+            continue
+        latest = max(latest, dt.timestamp())
+    return latest
+
+
+def should_suppress_by_history(sig: StockSignal, rows: list[dict[str, str]], now_ts: float) -> tuple[bool, str]:
+    if has_exact_duplicate(sig, rows):
+        return True, "setup_hash ya existe en histórico"
+    if not HISTORY_COOLDOWN_FALLBACK:
+        return False, ""
+    last_ts = recent_history_timestamp(sig.symbol, rows)
+    if last_ts and (now_ts - last_ts) < COOLDOWN:
+        hours_left = (COOLDOWN - (now_ts - last_ts)) / 3600.0
+        return True, f"cooldown CSV {hours_left:.1f}h restantes"
+    return False, ""
 
 
 def _prepare_closed_tracker_bars(df: Optional[pd.DataFrame], opened_dt: datetime) -> pd.DataFrame:
@@ -648,18 +750,15 @@ def get_earnings_info(symbol: str) -> tuple[Optional[str], bool]:
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
 
-    # EMAs
     df["ema20"] = df["Close"].ewm(span=20, adjust=False).mean()
     df["ema50"] = df["Close"].ewm(span=50, adjust=False).mean()
     df["ema200"] = df["Close"].ewm(span=200, adjust=False).mean()
 
-    # RSI Wilder
     delta = df["Close"].diff()
     gain = delta.where(delta > 0, 0.0).ewm(com=13, adjust=False).mean()
     loss = (-delta.where(delta < 0, 0.0)).ewm(com=13, adjust=False).mean()
     df["rsi"] = 100 - (100 / (1 + gain / (loss + 1e-9)))
 
-    # True Range + ATR
     prev_close = df["Close"].shift(1)
     tr = pd.concat(
         [
@@ -671,7 +770,6 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     ).max(axis=1)
     df["atr"] = tr.ewm(com=13, adjust=False).mean()
 
-    # ADX real con DI+/DI-
     up_move = df["High"].diff()
     dn_move = (-df["Low"].diff())
     plus_dm = up_move.where((up_move > dn_move) & (up_move > 0), 0.0)
@@ -683,22 +781,18 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["plus_di"] = plus_di
     df["minus_di"] = minus_di
 
-    # MACD
     ema12 = df["Close"].ewm(span=12, adjust=False).mean()
     ema26 = df["Close"].ewm(span=26, adjust=False).mean()
     df["macd"] = ema12 - ema26
     df["macd_sig"] = df["macd"].ewm(span=9, adjust=False).mean()
     df["macd_hist"] = df["macd"] - df["macd_sig"]
 
-    # Volumen relativo
     df["vol_sma20"] = df["Volume"].rolling(20).mean()
     df["vol_ratio"] = df["Volume"] / (df["vol_sma20"] + 1e-9)
 
-    # Pendientes
     df["ema200_slope_5"] = df["ema200"] - df["ema200"].shift(5)
     df["ema20_slope_3"] = df["ema20"] - df["ema20"].shift(3)
 
-    # Máximos / mínimos recientes
     df["prior_high_5"] = df["High"].shift(1).rolling(5).max()
     df["prior_high_20"] = df["High"].shift(1).rolling(20).max()
     df["prior_low_5"] = df["Low"].shift(1).rolling(5).min()
@@ -751,8 +845,9 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     if len(df) < max(220, RS_LOOKBACK + 25):
         return None
 
-    last = df.iloc[-2]  # última vela cerrada
+    last = df.iloc[-2]
     prev = df.iloc[-3]
+    trigger_candle_utc = _normalize_dt_text(pd.Timestamp(df.index[-2]).to_pydatetime().replace(tzinfo=timezone.utc) if df.index[-2].tzinfo is None else pd.Timestamp(df.index[-2]).to_pydatetime())
 
     name = STOCK_NAMES.get(symbol, symbol)
     group = STOCK_GROUPS.get(symbol, "Other")
@@ -786,7 +881,6 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     prior_swing_low = float(last["prior_low_12"]) if pd.notna(last["prior_low_12"]) else entry - 1.8 * atr
     prior_low_20 = float(last["prior_low_20"]) if pd.notna(last["prior_low_20"]) else prior_swing_low
 
-    # ── Bloqueos duros ────────────────────────────────────────────────────────
     if earnings_near and earnings_date_str:
         blocked.append(f"Earnings en {earnings_date_str} (±{EARNINGS_BUFFER_DAYS} días)")
 
@@ -813,7 +907,6 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
             f"Sin direccionalidad real (ADX={adx:.1f}, DI+={plus_di:.1f}, DI-={minus_di:.1f})"
         )
 
-    # ── Regime ────────────────────────────────────────────────────────────────
     if entry > ema200:
         regime_score += 1.0
         reasons.append("Precio > EMA200")
@@ -836,7 +929,6 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         regime_score -= 0.4
         warnings.append(f"DI sin liderazgo claro (DI+ {plus_di:.1f} vs DI- {minus_di:.1f})")
 
-    # ── Setup base ────────────────────────────────────────────────────────────
     if 0.15 <= pullback_atr <= PULLBACK_MAX_ATR:
         setup_score += 0.8
         reasons.append(f"Distancia operable a EMA20 ({pullback_atr:.2f} ATR)")
@@ -887,7 +979,6 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
             setup_score -= 0.7
             warnings.append(f"RS negativa vs SPY: {rs20:+.2f}%")
 
-    # ── Trigger base ──────────────────────────────────────────────────────────
     broke_prior_high_5 = entry > prior_high_5
     broke_prior_high_20 = entry > prior_high_20
     near_breakout = entry >= prior_high_20 * BREAKOUT_NEAR_PCT
@@ -921,7 +1012,6 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         trigger_score -= 0.4
         warnings.append(f"Volumen flojo ({vol_ratio:.2f}x)")
 
-    # ── Playbooks ─────────────────────────────────────────────────────────────
     pullback_trend_strong = entry > ema200 and ema50 > ema200 and ema20 > ema50 and adx >= 18
     breakout_structure = (
         broke_prior_high_20
@@ -950,7 +1040,6 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         and entry > ema50
     )
 
-    # Playbook híbrido: expansión temprana sobre tendencia, aunque no esté aún en 20D high limpio.
     is_hybrid = (
         not is_breakout
         and not is_pullback
@@ -984,7 +1073,6 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         setup_score -= 0.7
         warnings.append("No encaja limpio en pullback ni breakout")
 
-    # ── Ajustes de contexto ───────────────────────────────────────────────────
     score_adjustment, context_note = normalize_caution_adjustment(sym_context)
     if vix is not None and VIX_CAUTION_LEVEL <= vix < VIX_BLOCK_LEVEL:
         score_adjustment -= 0.5
@@ -996,9 +1084,7 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     if context_note:
         reasons.append(f"Contexto: {context_note}")
 
-    # ── Gestión de riesgo por playbook ────────────────────────────────────────
     range_20 = max(prior_high_20 - prior_low_20, 1.2 * atr)
-    dist_to_high20 = max(prior_high_20 - entry, 0.0)
     measured_move = max(0.75 * range_20, 1.6 * atr)
 
     if signal_type == "breakout":
@@ -1062,6 +1148,7 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         tp=round(tp, 2),
         stop=round(stop, 2),
         atr=round(atr, 2),
+        trigger_candle_utc=trigger_candle_utc,
         rsi=round(rsi, 2),
         adx=round(adx, 2),
         group=group,
@@ -1085,6 +1172,7 @@ def format_alert(sig: StockSignal, vix: Optional[float]) -> str:
     earnings_line = f"📅 *Próximos earnings:* {sig.earnings_date}\n" if sig.earnings_date else ""
     rs_line = f"⚔️ *RS vs SPY (20d):* {sig.rs20:+.2f}%\n" if sig.symbol != "SPY" else ""
     signal_type_line = f"🧠 *Playbook:* {sig.signal_type}\n" if sig.signal_type != "none" else ""
+    trigger_line = f"🕯️ *Trigger candle:* {sig.trigger_candle_utc}\n"
 
     signal_breakdown = (
         f"🧩 *Regime/Setup/Trigger:* "
@@ -1095,21 +1183,24 @@ def format_alert(sig: StockSignal, vix: Optional[float]) -> str:
     if sig.warnings:
         warnings_block = "\n⚠️ *Warnings:*\n" + "\n".join(f"  • {warn}" for warn in sig.warnings[:4])
 
+    confluences = "\n".join(f"  • {reason}" for reason in sig.reasons[:8])
+
     return (
-        f"{score_emoji} *ALERTA BOLSA v2.3: {sig.name} ({sig.symbol})*\n\n"
+        f"{score_emoji} *ALERTA BOLSA v2.5: {sig.name} ({sig.symbol})*\n\n"
         f"💰 *Precio:* ${sig.price:.2f}\n"
         f"📊 *Score:* {sig.score:.1f}\n"
         f"⚖️ *R:R estructural:* {sig.rr:.2f}x\n"
         f"📏 *ATR:* ${sig.atr:.2f} | *ADX:* {sig.adx:.1f} | *RSI:* {sig.rsi:.1f}\n"
         f"{signal_breakdown}"
         f"{signal_type_line}"
+        f"{trigger_line}"
         f"{rs_line}"
         f"{vix_line}"
         f"{earnings_line}\n"
         f"🎯 *TARGET:* ${sig.tp:.2f}\n"
         f"🛑 *STOP:* ${sig.stop:.2f}\n\n"
-        f"📝 *Confluencias:*\n" + "\n".join(f"  • {reason}" for reason in sig.reasons[:8]) +
-        warnings_block
+        f"📝 *Confluencias:*\n{confluences}"
+        f"{warnings_block}"
     )
 
 
@@ -1128,6 +1219,7 @@ def main() -> None:
     now = time.time()
 
     ensure_alert_history_schema()
+    history_rows = load_alert_history_rows()
 
     mode = "DRY RUN" if DRY_RUN else "PRODUCCIÓN"
     log.info("Iniciando escaneo v2 [%s] — %s acciones", mode, len(STOCKS))
@@ -1144,6 +1236,7 @@ def main() -> None:
             tracker_stats["still_open"],
             tracker_stats["invalid"],
         )
+        history_rows = load_alert_history_rows()
 
     vix = fetch_vix()
     if vix is not None:
@@ -1161,10 +1254,12 @@ def main() -> None:
     if spy_df is None:
         log.warning("SPY no disponible — se omite relative strength benchmark")
 
-    stats = {k: 0 for k in ("scanned", "cooldown", "no_data", "blocked", "no_signal", "alerts")}
+    stats = {k: 0 for k in ("scanned", "cooldown", "no_data", "blocked", "duplicate", "no_signal", "alerts")}
 
     for symbol in STOCKS:
-        last_alert = state.get(symbol, 0)
+        last_alert_state = float(state.get(symbol, 0) or 0)
+        fallback_last_ts = recent_history_timestamp(symbol, history_rows)
+        last_alert = max(last_alert_state, fallback_last_ts)
         remaining = COOLDOWN - (now - last_alert)
         if remaining > 0:
             log.info("COOLDOWN %s: %.1fh restantes", symbol, remaining / 3600)
@@ -1194,18 +1289,33 @@ def main() -> None:
                     format_reject_log(sig),
                 )
             elif sig.should_alert:
+                suppress, reason = should_suppress_by_history(sig, history_rows, now)
+                if suppress:
+                    stats["duplicate"] += 1
+                    log.info(
+                        "🛡️ DUPLICADA %s | score=%.1f | RR=%.2f | playbook=%s | %s",
+                        sig.symbol,
+                        sig.score,
+                        sig.rr,
+                        sig.signal_type,
+                        reason,
+                    )
+                    continue
+
                 if send_telegram(format_alert(sig, vix)):
                     append_alert_history(sig, vix)
+                    history_rows = load_alert_history_rows()
                     state[sig.symbol] = now
                     save_state(state)
                     stats["alerts"] += 1
                     log.info(
-                        "✅ ALERTA %s | score=%.1f | RR=%.2f | playbook=%s | RS20=%+.2f%%",
+                        "✅ ALERTA %s | score=%.1f | RR=%.2f | playbook=%s | RS20=%+.2f%% | trigger=%s",
                         sig.symbol,
                         sig.score,
                         sig.rr,
                         sig.signal_type,
                         sig.rs20,
+                        sig.trigger_candle_utc,
                     )
             else:
                 stats["no_signal"] += 1
@@ -1226,11 +1336,12 @@ def main() -> None:
             log.error("%s: excepción — %s", symbol, exc, exc_info=True)
 
     log.info(
-        "Escaneo completado | Escaneados:%s | Cooldown:%s | Sin datos:%s | Bloqueados:%s | Sin señal:%s | Alertas:%s",
+        "Escaneo completado | Escaneados:%s | Cooldown:%s | Sin datos:%s | Bloqueados:%s | Duplicadas:%s | Sin señal:%s | Alertas:%s",
         stats["scanned"],
         stats["cooldown"],
         stats["no_data"],
         stats["blocked"],
+        stats["duplicate"],
         stats["no_signal"],
         stats["alerts"],
     )
@@ -1241,6 +1352,7 @@ def main() -> None:
             f"📋 *Resumen escaneo bolsa*\n\n"
             f"{vix_summary}"
             f"✅ Alertas enviadas: {stats['alerts']}\n"
+            f"🛡️ Duplicadas bloqueadas: {stats['duplicate']}\n"
             f"○ Sin señal: {stats['no_signal']}\n"
             f"⚠️ Bloqueadas: {stats['blocked']}\n"
             f"💤 En cooldown: {stats['cooldown']}\n"
