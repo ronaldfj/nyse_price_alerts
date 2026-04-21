@@ -46,15 +46,16 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MARKET_CONTEXT_FILE: market_context_stocks.json
           STOCK_STATE_FILE: stock_state.json
-          MIN_SCORE: "6.0"
-          MIN_RR: "1.9"
+          MIN_SCORE: "5.6"
+          MIN_RR: "1.4"
           COOLDOWN_HOURS: "0"
           EARNINGS_BUFFER_DAYS: "5"
           VIX_BLOCK_LEVEL: "30"
           VIX_CAUTION_LEVEL: "22"
-          TRIGGER_VOL_RATIO: "1.4"
+          TRIGGER_VOL_RATIO: "1.00"
           SETUP_RSI_MIN: "45"
-          SETUP_RSI_MAX: "65"
+          SETUP_RSI_MAX: "76"
+          BREAKOUT_MAX_ATR: "3.20"
           RS_LOOKBACK: "20"
           SWING_LOOKBACK: "12"
         run: python alert.py
