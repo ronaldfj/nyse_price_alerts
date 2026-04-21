@@ -1,4 +1,4 @@
-# 📈 Stock Sentinel Bot v2
+# 📈 Stock Sentinel Bot
 
 Refactor de la estrategia de alertas para acciones con foco en entradas más limpias y menos falsos positivos.
 
