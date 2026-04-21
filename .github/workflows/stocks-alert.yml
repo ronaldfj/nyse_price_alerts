@@ -48,7 +48,7 @@ jobs:
           STOCK_STATE_FILE: stock_state.json
           MIN_SCORE: "6.0"
           MIN_RR: "1.9"
-          COOLDOWN_HOURS: "48"
+          COOLDOWN_HOURS: "0"
           EARNINGS_BUFFER_DAYS: "5"
           VIX_BLOCK_LEVEL: "30"
           VIX_CAUTION_LEVEL: "22"
@@ -66,3 +66,10 @@ jobs:
           git add stock_state.json
           git diff --cached --quiet || git commit -m "chore: update stock scanner state"
           git push
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
