@@ -1,5 +1,5 @@
 """
-Stock Sentinel Bot v2 — Alertas técnicas para NYSE/Nasdaq
+Stock Sentinel Bot — Alertas técnicas para NYSE/Nasdaq
 Iteración 1 aplicada:
   - Score por capas: regime / setup / trigger
   - R:R estructural real usando swing low + ATR buffer
