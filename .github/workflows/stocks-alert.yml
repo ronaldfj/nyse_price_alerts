@@ -71,11 +71,15 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add stock_state.json
           git diff --cached --quiet || git commit -m "chore: update stock scanner state"
+          git push  
+          git add stock_state.json alerts_history.csv
+          git diff --cached --quiet || git commit -m "chore: update stock scanner state and alert history"
           git push
-
       - name: Instalar Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
           cache-dependency-path: requirements.txt
+    env:
+      ALERTS_HISTORY_FILE: alerts_history.csv
