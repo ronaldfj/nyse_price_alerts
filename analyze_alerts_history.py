@@ -149,7 +149,7 @@ def expectation_table(df: pd.DataFrame, by: str) -> pd.DataFrame:
         return pd.DataFrame()
 
     grouped = []
-    for key, g in df.groupby(by, dropna=False):
+    for key, g in df.groupby(by, dropna=False, observed=True):
         n = len(g)
         wins = g["status"].eq("hit_target").sum()
         stops = g["status"].eq("hit_stop").sum()
