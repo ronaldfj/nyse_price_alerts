@@ -71,6 +71,9 @@ jobs:
           COOLDOWN_HOURS: "0"
           REQUIRE_PLAYBOOK: "true"
           ALERT_ETFS: "false"
+          SUPERTREND_PERIOD: "10"
+          SUPERTREND_MULTIPLIER: "3.0"
+          SUPERTREND_REGIME_BLOCK: "true"
         run: python alert.py
 
       - name: Analizar histórico
