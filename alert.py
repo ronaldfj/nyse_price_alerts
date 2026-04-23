@@ -116,6 +116,9 @@ REQUIRE_PLAYBOOK = os.getenv("REQUIRE_PLAYBOOK", "true").lower() == "true"
 TRACKER_MAX_BARS_OPEN = int(os.getenv("TRACKER_MAX_BARS_OPEN", "15"))
 TRACKER_ENABLED = os.getenv("TRACKER_ENABLED", "true").lower() == "true"
 HISTORY_COOLDOWN_FALLBACK = os.getenv("HISTORY_COOLDOWN_FALLBACK", "true").lower() == "true"
+SUPERTREND_PERIOD = int(os.getenv("SUPERTREND_PERIOD", "10"))
+SUPERTREND_MULTIPLIER = float(os.getenv("SUPERTREND_MULTIPLIER", "3.0"))
+SUPERTREND_REGIME_BLOCK = os.getenv("SUPERTREND_REGIME_BLOCK", "true").lower() == "true"
 
 DEFAULT_CONTEXT_CANDIDATES = (
     os.getenv("MARKET_CONTEXT_FILE", ""),
@@ -187,6 +190,8 @@ class StockSignal:
     extension_pct: float = 0.0
     rs20: float = 0.0
     signal_type: str = "none"
+    supertrend_bull: bool = False
+    supertrend_val: float = 0.0
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
@@ -749,6 +754,82 @@ def get_earnings_info(symbol: str) -> tuple[Optional[str], bool]:
         return None, False
 
 
+# ── Supertrend (vectorizado, O(n) sin loops Python) ──────────────────────────
+def compute_supertrend_vectorized(
+    df: pd.DataFrame,
+    period: int = 10,
+    multiplier: float = 3.0,
+) -> pd.DataFrame:
+    """
+    Calcula Supertrend completamente vectorizado usando numpy.
+    Columnas añadidas:
+      st_atr        – ATR(period) con RMA (Wilder)
+      st_upper_raw  – banda superior sin suavizado
+      st_lower_raw  – banda inferior sin suavizado
+      st_upper      – banda superior final (suavizada por lógica Supertrend)
+      st_lower      – banda inferior final
+      st_trend      – 1 = alcista, -1 = bajista
+      st_value      – valor activo del Supertrend en cada barra
+    Complejidad: O(n) — un único loop numpy sobre el array de precios.
+    """
+    import numpy as np
+
+    n = len(df)
+    high = df["High"].to_numpy(dtype=float)
+    low = df["Low"].to_numpy(dtype=float)
+    close = df["Close"].to_numpy(dtype=float)
+
+    # RMA (Wilder) del TR — idéntico al ATR de Pine Script
+    tr = np.maximum(
+        high - low,
+        np.maximum(
+            np.abs(high - np.roll(close, 1)),
+            np.abs(low - np.roll(close, 1)),
+        ),
+    )
+    tr[0] = high[0] - low[0]
+
+    alpha = 1.0 / period
+    rma = np.empty(n, dtype=float)
+    rma[0] = tr[0]
+    for i in range(1, n):
+        rma[i] = alpha * tr[i] + (1.0 - alpha) * rma[i - 1]
+
+    hl2 = (high + low) / 2.0
+    upper_raw = hl2 + multiplier * rma
+    lower_raw = hl2 - multiplier * rma
+
+    # Iteración única para aplicar la lógica de suavizado de bandas
+    upper = upper_raw.copy()
+    lower = lower_raw.copy()
+    trend = np.ones(n, dtype=float)   # 1 = bull, -1 = bear
+    st_value = np.empty(n, dtype=float)
+    st_value[0] = upper_raw[0]
+
+    for i in range(1, n):
+        # Banda superior: sólo se actualiza a la baja si el cierre anterior estaba por debajo
+        upper[i] = upper_raw[i] if (upper_raw[i] < upper[i - 1] or close[i - 1] > upper[i - 1]) else upper[i - 1]
+        # Banda inferior: sólo se actualiza al alza si el cierre anterior estaba por encima
+        lower[i] = lower_raw[i] if (lower_raw[i] > lower[i - 1] or close[i - 1] < lower[i - 1]) else lower[i - 1]
+
+        if trend[i - 1] == -1.0:
+            trend[i] = 1.0 if close[i] > upper[i - 1] else -1.0
+        else:
+            trend[i] = -1.0 if close[i] < lower[i - 1] else 1.0
+
+        st_value[i] = lower[i] if trend[i] == 1.0 else upper[i]
+
+    out = df.copy()
+    out["st_atr"] = rma
+    out["st_upper_raw"] = upper_raw
+    out["st_lower_raw"] = lower_raw
+    out["st_upper"] = upper
+    out["st_lower"] = lower
+    out["st_trend"] = trend
+    out["st_value"] = st_value
+    return out
+
+
 # ── Indicadores técnicos ──────────────────────────────────────────────────────
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -801,6 +882,9 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["prior_low_5"] = df["Low"].shift(1).rolling(5).min()
     df["prior_low_12"] = df["Low"].shift(1).rolling(SWING_LOOKBACK).min()
     df["prior_low_20"] = df["Low"].shift(1).rolling(20).min()
+
+    # Supertrend (vectorizado)
+    df = compute_supertrend_vectorized(df, period=SUPERTREND_PERIOD, multiplier=SUPERTREND_MULTIPLIER)
 
     return df
 
@@ -884,6 +968,13 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     prior_swing_low = float(last["prior_low_12"]) if pd.notna(last["prior_low_12"]) else entry - 1.8 * atr
     prior_low_20 = float(last["prior_low_20"]) if pd.notna(last["prior_low_20"]) else prior_swing_low
 
+    # Supertrend
+    st_trend_last = int(last["st_trend"]) if pd.notna(last.get("st_trend")) else 0
+    st_trend_prev = int(prev["st_trend"]) if pd.notna(prev.get("st_trend")) else 0
+    st_value_last = float(last["st_value"]) if pd.notna(last.get("st_value")) else 0.0
+    supertrend_bull = st_trend_last == 1
+    supertrend_cross_up = (st_trend_prev == -1) and (st_trend_last == 1)   # cruce alcista reciente
+
     if earnings_near and earnings_date_str:
         blocked.append(f"Earnings en {earnings_date_str} (±{EARNINGS_BUFFER_DAYS} días)")
 
@@ -892,6 +983,13 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
 
     if sym_context.get("hard_block_long"):
         blocked.append(f"Bloqueo manual: {sym_context.get('note', 'sin nota')}")
+
+    # Hard block: Supertrend bajista con tendencia confirmada (ADX > 20)
+    # Solo bloquea si el flag SUPERTREND_REGIME_BLOCK está activo y ADX confirma dirección
+    if SUPERTREND_REGIME_BLOCK and not supertrend_bull and adx >= 20:
+        blocked.append(
+            f"Supertrend bajista (ST={st_value_last:.2f}, ADX={adx:.1f}) — sin sesgo alcista"
+        )
 
     if extension_pct > 30:
         blocked.append(f"Precio sobreextendido: {extension_pct:.1f}% sobre EMA200")
@@ -928,6 +1026,17 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     if float(last["ema200_slope_5"]) > 0:
         regime_score += 0.75
         reasons.append("EMA200 con pendiente positiva")
+
+    # Supertrend — confirmación / penalización de régimen
+    if supertrend_cross_up:
+        regime_score += 1.2
+        reasons.append(f"Supertrend: cruce alcista reciente (ST={st_value_last:.2f})")
+    elif supertrend_bull:
+        regime_score += 0.6
+        reasons.append(f"Supertrend alcista (ST={st_value_last:.2f})")
+    else:
+        regime_score -= 0.5
+        warnings.append(f"Supertrend bajista (ST={st_value_last:.2f})")
 
     if plus_di > minus_di and adx >= 18:
         regime_score += 1.0
@@ -1004,6 +1113,11 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     elif near_breakout:
         trigger_score += 0.35
         reasons.append("Cerca de ruptura del máximo de 20 sesiones")
+
+    # Supertrend cruce alcista también suma como trigger (señal de entrada limpia)
+    if supertrend_cross_up:
+        trigger_score += 0.6
+        reasons.append("Supertrend: flip alcista = entrada de tendencia")
 
     if positive_momentum and float(last["macd_hist"]) > 0:
         trigger_score += 0.8
@@ -1175,6 +1289,8 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         extension_pct=round(extension_pct, 2),
         rs20=round(rs20, 2),
         signal_type=signal_type,
+        supertrend_bull=supertrend_bull,
+        supertrend_val=round(st_value_last, 2),
         reasons=reasons,
         warnings=warnings,
         blocked=blocked,
@@ -1189,6 +1305,9 @@ def format_alert(sig: StockSignal, vix: Optional[float]) -> str:
     rs_line = f"⚔️ *RS vs SPY (20d):* {sig.rs20:+.2f}%\n" if sig.symbol != "SPY" else ""
     signal_type_line = f"🧠 *Playbook:* {sig.signal_type}\n" if sig.signal_type != "none" else ""
     trigger_line = f"🕯️ *Trigger candle:* {sig.trigger_candle_utc}\n"
+    st_emoji = "🟢" if sig.supertrend_bull else "🔴"
+    st_dir = "ALCISTA" if sig.supertrend_bull else "BAJISTA"
+    supertrend_line = f"{st_emoji} *Supertrend({SUPERTREND_PERIOD},{SUPERTREND_MULTIPLIER}):* {st_dir} @ ${sig.supertrend_val:.2f}\n"
 
     signal_breakdown = (
         f"🧩 *Regime/Setup/Trigger:* "
@@ -1207,6 +1326,7 @@ def format_alert(sig: StockSignal, vix: Optional[float]) -> str:
         f"📊 *Score:* {sig.score:.1f}\n"
         f"⚖️ *R:R estructural:* {sig.rr:.2f}x\n"
         f"📏 *ATR:* ${sig.atr:.2f} | *ADX:* {sig.adx:.1f} | *RSI:* {sig.rsi:.1f}\n"
+        f"{supertrend_line}"
         f"{signal_breakdown}"
         f"{signal_type_line}"
         f"{trigger_line}"
