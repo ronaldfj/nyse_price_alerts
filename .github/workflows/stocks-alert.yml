@@ -24,12 +24,12 @@ jobs:
 
     steps:
       - name: Descargar repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
         with:
           persist-credentials: true
 
       - name: Instalar Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v5.6.0
         with:
           python-version: "3.11"
           cache: "pip"
@@ -71,9 +71,6 @@ jobs:
           COOLDOWN_HOURS: "0"
           REQUIRE_PLAYBOOK: "true"
           ALERT_ETFS: "false"
-          SUPERTREND_PERIOD: "10"
-          SUPERTREND_MULTIPLIER: "3.0"
-          SUPERTREND_REGIME_BLOCK: "true"
         run: python alert.py
 
       - name: Analizar histórico
@@ -85,7 +82,7 @@ jobs:
 
       - name: Subir reporte de análisis
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: alerts-analysis
           path: analysis_output/
