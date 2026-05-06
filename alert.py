@@ -1,19 +1,27 @@
 
 """
 Stock Sentinel Bot — Alertas técnicas para NYSE/Nasdaq
-Iteración 1.5:
-  - Score por capas: regime / setup / trigger
+Iteración 2.1:
+  === Iteración 2.0 — Entry Quality Filter ===
+  - Breakout ATR Gate: vol_ratio >= BREAKOUT_EXTENDED_VOL_RATIO si pullback_atr > BREAKOUT_ATR_GATE
+  - Score deflation cuadratica para extensiones sobre EMA200 (reemplaza penalizacion lineal)
+  - Regime score cap: EMA200 slope inconsistente (slope5 vs slope3) reduce peso del regimen
+  - Re-entry cooldown dinamico: tras hit_stop -> 72h + MIN_SCORE+1.0 por simbolo
+  - should_suppress_by_history_v2: lee exit_reason del CSV para aplicar cooldown diferenciado
+
+  === Iteracion 2.1 — Multi-Signal Confluence + Adaptive Scoring ===
+  - CONFLUENCE_BONUS: score +0.5 cuando >=3 confluencias de entrada activas
+  - TREND_QUALITY_SCORE: ratio DI+/(DI++DI-) pondera regime_score de forma continua
+  - Adaptive MIN_RR: sube a MIN_RR * 1.25 si extension_pct > 20
+  - VOLUME_PROFILE_FILTER: penaliza volumen decreciente en ultimas 3 velas (distribucion)
+  - Score por capas: regime / setup / trigger (heredado de 1.5)
   - Hard blocks solo para riesgo real
-  - Warnings / penalizaciones para setup subóptimo
   - Dos playbooks: pullback continuation / breakout expansion
   - R:R estructural usando swing low + rango reciente
-  - Pendiente de EMA200 para evitar tendencias planas
   - Relative strength simple vs SPY (20 sesiones)
   - Soporte a market_context_stocks.json por defecto
-  - Uso real de caution_level desde market_context
   - DRY_RUN para pruebas sin Telegram
-  - Persistencia opcional de alertas a CSV histórico
-  - Tracker automático de outcomes: open / hit_target / hit_stop / expired
+  - Tracker automatico de outcomes: open / hit_target / hit_stop / expired
   - Idempotencia por setup_hash + fallback de cooldown desde CSV
 """
 
@@ -119,6 +127,22 @@ HISTORY_COOLDOWN_FALLBACK = os.getenv("HISTORY_COOLDOWN_FALLBACK", "true").lower
 SUPERTREND_PERIOD = int(os.getenv("SUPERTREND_PERIOD", "10"))
 SUPERTREND_MULTIPLIER = float(os.getenv("SUPERTREND_MULTIPLIER", "3.0"))
 SUPERTREND_REGIME_BLOCK = os.getenv("SUPERTREND_REGIME_BLOCK", "true").lower() == "true"
+
+# -- Iteracion 2.0 -- Entry Quality Filter -----------------------------------
+BREAKOUT_ATR_GATE = float(os.getenv('BREAKOUT_ATR_GATE', '2.0'))
+BREAKOUT_EXTENDED_VOL_RATIO = float(os.getenv('BREAKOUT_EXTENDED_VOL_RATIO', '1.8'))
+POST_STOP_COOLDOWN = int(os.getenv('POST_STOP_COOLDOWN_HOURS', '72')) * 3600
+POST_STOP_SCORE_PENALTY = float(os.getenv('POST_STOP_SCORE_PENALTY', '1.0'))
+SLOPE_CONSISTENCY_RATIO = float(os.getenv('SLOPE_CONSISTENCY_RATIO', '0.3'))
+SLOPE_WEAK_PENALTY = float(os.getenv('SLOPE_WEAK_PENALTY', '0.4'))
+
+# -- Iteracion 2.1 -- Multi-Signal Confluence + Adaptive Scoring -------------
+CONFLUENCE_THRESHOLD = int(os.getenv('CONFLUENCE_THRESHOLD', '3'))
+CONFLUENCE_BONUS = float(os.getenv('CONFLUENCE_BONUS', '0.5'))
+ADAPTIVE_RR_EXTENSION_THRESHOLD = float(os.getenv('ADAPTIVE_RR_EXTENSION_THRESHOLD', '20.0'))
+ADAPTIVE_RR_MULTIPLIER = float(os.getenv('ADAPTIVE_RR_MULTIPLIER', '1.25'))
+VOLUME_PROFILE_LOOKBACK = int(os.getenv('VOLUME_PROFILE_LOOKBACK', '3'))
+VOLUME_PROFILE_PENALTY = float(os.getenv('VOLUME_PROFILE_PENALTY', '0.5'))
 
 DEFAULT_CONTEXT_CANDIDATES = (
     os.getenv("MARKET_CONTEXT_FILE", ""),
@@ -466,16 +490,59 @@ def recent_history_timestamp(symbol: str, rows: list[dict[str, str]]) -> float:
     return latest
 
 
-def should_suppress_by_history(sig: StockSignal, rows: list[dict[str, str]], now_ts: float) -> tuple[bool, str]:
+def _last_exit_reason_for_symbol(symbol: str, rows: list[dict[str, str]]) -> str:
+    """Retorna el exit_reason del trade mas reciente cerrado para el simbolo."""
+    latest_ts = 0.0
+    latest_reason = ""
+    for row in rows:
+        if (row.get("symbol") or "").strip() != symbol:
+            continue
+        status = (row.get("status") or "").strip().lower()
+        if status not in {"hit_stop", "hit_target", "expired"}:
+            continue
+        dt = _parse_iso_datetime(row.get("closed_utc", "") or row.get("timestamp_utc", ""))
+        if dt is None:
+            continue
+        ts = dt.timestamp()
+        if ts > latest_ts:
+            latest_ts = ts
+            latest_reason = (row.get("exit_reason") or "").strip().lower()
+    return latest_reason
+
+
+def should_suppress_by_history(sig: StockSignal, rows: list[dict[str, str]], now_ts: float, min_score_override: float = 0.0) -> tuple[bool, str]:
+    """
+    v2.0: cooldown dinamico post-stop.
+    - hit_stop reciente -> 72h + score minimo elevado
+    - Normal -> COOLDOWN estandar
+    """
     if has_exact_duplicate(sig, rows):
-        return True, "setup_hash ya existe en histórico"
+        return True, "setup_hash ya existe en historico"
     if not HISTORY_COOLDOWN_FALLBACK:
         return False, ""
+
     last_ts = recent_history_timestamp(sig.symbol, rows)
-    if last_ts and (now_ts - last_ts) < COOLDOWN:
-        hours_left = (COOLDOWN - (now_ts - last_ts)) / 3600.0
-        return True, f"cooldown CSV {hours_left:.1f}h restantes"
+    if not last_ts:
+        return False, ""
+
+    elapsed = now_ts - last_ts
+    last_exit = _last_exit_reason_for_symbol(sig.symbol, rows)
+    post_stop = "stop" in last_exit  # stop_hit, time_stop_*
+
+    if post_stop:
+        if elapsed < POST_STOP_COOLDOWN:
+            hours_left = (POST_STOP_COOLDOWN - elapsed) / 3600.0
+            return True, f"post-stop cooldown {hours_left:.1f}h restantes (72h)"
+        required_score = MIN_SCORE + POST_STOP_SCORE_PENALTY
+        if sig.score < required_score:
+            return True, f"post-stop score insuficiente ({sig.score:.1f} < {required_score:.1f} requerido)"
+    else:
+        if elapsed < COOLDOWN:
+            hours_left = (COOLDOWN - elapsed) / 3600.0
+            return True, f"cooldown CSV {hours_left:.1f}h restantes"
+
     return False, ""
+
 
 
 def _prepare_closed_tracker_bars(df: Optional[pd.DataFrame], opened_dt: datetime) -> pd.DataFrame:
@@ -875,6 +942,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["vol_ratio"] = df["Volume"] / (df["vol_sma20"] + 1e-9)
 
     df["ema200_slope_5"] = df["ema200"] - df["ema200"].shift(5)
+    df["ema200_slope_3"] = df["ema200"] - df["ema200"].shift(3)
     df["ema20_slope_3"] = df["ema20"] - df["ema20"].shift(3)
 
     df["prior_high_5"] = df["High"].shift(1).rolling(5).max()
@@ -991,11 +1059,14 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
             f"Supertrend bajista (ST={st_value_last:.2f}, ADX={adx:.1f}) — sin sesgo alcista"
         )
 
+    # v2.0: deflacion cuadratica por extension sobre EMA200
     if extension_pct > 30:
         blocked.append(f"Precio sobreextendido: {extension_pct:.1f}% sobre EMA200")
-    elif extension_pct > 24:
-        setup_score -= 0.6
-        warnings.append(f"Extensión alta: {extension_pct:.1f}% sobre EMA200")
+    elif extension_pct > 20:
+        # penalty cuadratica: sube de -0.45 a -1.10 entre 20% y 30%
+        ext_penalty = 0.45 * ((extension_pct - 20) / 10.0) ** 2 + 0.45
+        setup_score -= round(ext_penalty, 2)
+        warnings.append(f"Extension alta: {extension_pct:.1f}% sobre EMA200 (penalty={ext_penalty:.2f})")
 
     if rsi > 80:
         blocked.append(f"RSI extremo ({rsi:.1f})")
@@ -1023,11 +1094,21 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         regime_score += 0.75
         reasons.append("EMA50 > EMA200")
 
-    if float(last["ema200_slope_5"]) > 0:
-        regime_score += 0.75
-        reasons.append("EMA200 con pendiente positiva")
+    slope5 = float(last["ema200_slope_5"])
+    slope3 = float(last["ema200_slope_3"]) if "ema200_slope_3" in last.index else slope5
+    if slope5 > 0:
+        # v2.0: slope consistency cap — si la pendiente corta no confirma la larga, penalizar
+        if slope3 > 0 and slope5 >= slope3 * SLOPE_CONSISTENCY_RATIO:
+            regime_score += 0.75
+            reasons.append("EMA200 con pendiente positiva consistente")
+        else:
+            regime_score += 0.75 - SLOPE_WEAK_PENALTY
+            warnings.append(f"EMA200 slope inconsistente (slope5={slope5:.2f} vs slope3={slope3:.2f})")
+    else:
+        regime_score -= 0.2
+        warnings.append("EMA200 sin pendiente positiva")
 
-    # Supertrend — confirmación / penalización de régimen
+    # Supertrend — confirmacion / penalizacion de regimen
     if supertrend_cross_up:
         regime_score += 1.2
         reasons.append(f"Supertrend: cruce alcista reciente (ST={st_value_last:.2f})")
@@ -1038,12 +1119,16 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         regime_score -= 0.5
         warnings.append(f"Supertrend bajista (ST={st_value_last:.2f})")
 
+    # v2.1: trend quality score continuo — ratio DI+ pondera el bonus de direccionalidad
+    di_total = plus_di + minus_di + 1e-9
+    trend_quality = plus_di / di_total  # 0.5 = empate, >0.5 = alcista
     if plus_di > minus_di and adx >= 18:
-        regime_score += 1.0
-        reasons.append(f"Direccionalidad válida (ADX {adx:.1f})")
+        quality_bonus = round(1.0 * trend_quality * 2, 2)  # max 1.0 cuando DI+ domina totalmente
+        regime_score += quality_bonus
+        reasons.append(f"Direccionalidad valida (ADX {adx:.1f}, quality={trend_quality:.2f})")
     elif plus_di > minus_di and adx >= WEAK_ADX_BLOCK:
-        regime_score += 0.4
-        warnings.append(f"Direccionalidad todavía débil (ADX {adx:.1f})")
+        regime_score += 0.4 * trend_quality * 2
+        warnings.append(f"Direccionalidad todavia debil (ADX {adx:.1f})")
     elif adx >= 18:
         regime_score -= 0.4
         warnings.append(f"DI sin liderazgo claro (DI+ {plus_di:.1f} vs DI- {minus_di:.1f})")
@@ -1128,13 +1213,31 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
 
     if vol_ratio >= TRIGGER_VOL_RATIO:
         trigger_score += 0.8
-        reasons.append(f"Volumen de confirmación ({vol_ratio:.2f}x)")
+        reasons.append(f"Volumen de confirmacion ({vol_ratio:.2f}x)")
     elif vol_ratio >= 0.95:
         trigger_score += 0.15
         reasons.append(f"Volumen aceptable ({vol_ratio:.2f}x)")
     else:
         trigger_score -= 0.4
         warnings.append(f"Volumen flojo ({vol_ratio:.2f}x)")
+
+    # v2.0: Breakout ATR Gate — breakouts extendidos sin volumen alto se penalizan
+    if pullback_atr > BREAKOUT_ATR_GATE and vol_ratio < BREAKOUT_EXTENDED_VOL_RATIO:
+        trigger_score -= 0.7
+        warnings.append(
+            f"Breakout extendido sin vol suficiente ({pullback_atr:.2f} ATR, "
+            f"vol={vol_ratio:.2f}x < {BREAKOUT_EXTENDED_VOL_RATIO}x requerido)"
+        )
+
+    # v2.1: Volume profile filter — 3 velas de volumen decreciente = posible distribucion
+    if len(df) >= VOLUME_PROFILE_LOOKBACK + 2:
+        recent_vols = df["Volume"].iloc[-(VOLUME_PROFILE_LOOKBACK + 1):-1].values
+        vol_decreasing = all(recent_vols[i] > recent_vols[i + 1] for i in range(len(recent_vols) - 1))
+        if vol_decreasing:
+            trigger_score -= VOLUME_PROFILE_PENALTY
+            warnings.append(
+                f"Volumen decreciente ultimas {VOLUME_PROFILE_LOOKBACK} velas — posible distribucion"
+            )
 
     pullback_trend_strong = entry > ema200 and ema50 > ema200 and ema20 > ema50 and adx >= 18
     breakout_structure = (
@@ -1202,6 +1305,19 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         score_adjustment -= 0.5
         reasons.append(f"VIX elevado ({vix:.1f})")
 
+    # v2.1: Confluence bonus — suma si hay >= CONFLUENCE_THRESHOLD senales de entrada activas
+    confluence_signals = [
+        broke_prior_high_5,
+        bullish_reclaim,
+        supertrend_cross_up,
+        positive_momentum and float(last["macd_hist"]) > 0,
+        vol_ratio >= TRIGGER_VOL_RATIO,
+    ]
+    confluence_count = sum(bool(s) for s in confluence_signals)
+    if confluence_count >= CONFLUENCE_THRESHOLD:
+        score_adjustment += CONFLUENCE_BONUS
+        reasons.append(f"Confluencia de entrada ({confluence_count}/5 senales activas) +{CONFLUENCE_BONUS}")
+
     total_score = round(regime_score + setup_score + trigger_score + score_adjustment, 2)
     if score_adjustment != 0:
         reasons.append(f"Ajuste macro/manual: {score_adjustment:+.2f}")
@@ -1268,6 +1384,25 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         tp = entry + max(1.20 * atr, 0.60 * range_20)
 
     rr = (tp - entry) / max(risk, 1e-9)
+
+    # v2.1: Adaptive MIN_RR — setups extendidos deben justificar mas margen
+    effective_min_rr = MIN_RR
+    if extension_pct > ADAPTIVE_RR_EXTENSION_THRESHOLD:
+        effective_min_rr = round(MIN_RR * ADAPTIVE_RR_MULTIPLIER, 2)
+        if rr < effective_min_rr:
+            warnings.append(
+                f"RR insuficiente para setup extendido ({rr:.2f} < {effective_min_rr:.2f} requerido)"
+            )
+            # No bloquea, pero se refleja en should_alert via rr vs MIN_RR adaptativo
+            # almacenar en signal_type para que should_alert pueda inspeccionarlo
+    # Guardamos el effective_min_rr como atributo temporal en el objeto
+    # (lo comparamos en should_alert via el campo blocked si falla)
+    if rr < effective_min_rr and not any("extendido" in b for b in blocked):
+        if extension_pct > ADAPTIVE_RR_EXTENSION_THRESHOLD:
+            blocked.append(
+                f"Adaptive RR insuficiente: {rr:.2f} < {effective_min_rr:.2f} "
+                f"(extension={extension_pct:.1f}% > {ADAPTIVE_RR_EXTENSION_THRESHOLD}%)"
+            )
 
     return StockSignal(
         symbol=symbol,
