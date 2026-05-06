@@ -71,6 +71,20 @@ jobs:
           COOLDOWN_HOURS: "24"
           REQUIRE_PLAYBOOK: "true"
           ALERT_ETFS: "false"
+          # -- Iteracion 2.0 -- Entry Quality Filter --
+          BREAKOUT_ATR_GATE: "2.0"
+          BREAKOUT_EXTENDED_VOL_RATIO: "1.8"
+          POST_STOP_COOLDOWN_HOURS: "72"
+          POST_STOP_SCORE_PENALTY: "1.0"
+          SLOPE_CONSISTENCY_RATIO: "0.3"
+          SLOPE_WEAK_PENALTY: "0.4"
+          # -- Iteracion 2.1 -- Confluence + Adaptive Scoring --
+          CONFLUENCE_THRESHOLD: "3"
+          CONFLUENCE_BONUS: "0.5"
+          ADAPTIVE_RR_EXTENSION_THRESHOLD: "20.0"
+          ADAPTIVE_RR_MULTIPLIER: "1.25"
+          VOLUME_PROFILE_LOOKBACK: "3"
+          VOLUME_PROFILE_PENALTY: "0.5"
         run: python alert.py
 
       - name: Analizar histórico
