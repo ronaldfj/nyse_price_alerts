@@ -10,6 +10,8 @@ Iteración 2.1:
   - should_suppress_by_history_v2: lee exit_reason del CSV para aplicar cooldown diferenciado
 
   === Iteracion 2.1 — Multi-Signal Confluence + Adaptive Scoring ===
+
+  === Iteracion 2.2 — Group-Aware RS Thresholds + Dynamic Vol Gate ===
   - CONFLUENCE_BONUS: score +0.5 cuando >=3 confluencias de entrada activas
   - TREND_QUALITY_SCORE: ratio DI+/(DI++DI-) pondera regime_score de forma continua
   - Adaptive MIN_RR: sube a MIN_RR * 1.25 si extension_pct > 20
@@ -119,6 +121,22 @@ WEAK_ADX_BLOCK = float(os.getenv("WEAK_ADX_BLOCK", "15.0"))
 BREAKOUT_RS_MIN = float(os.getenv("BREAKOUT_RS_MIN", "-0.5"))
 BREAKOUT_NEAR_PCT = float(os.getenv("BREAKOUT_NEAR_PCT", "0.995"))
 FINAL_RS_MIN = float(os.getenv("FINAL_RS_MIN", "0.0"))
+
+# v2.2: RS minima por grupo — Finance/Health suelen rezagarse estructuralmente vs SPY
+# Formato: "GROUP:valor,GROUP:valor" — grupos sin entry usan FINAL_RS_MIN global
+FINAL_RS_MIN_BY_GROUP_RAW = os.getenv("FINAL_RS_MIN_BY_GROUP", "Finance:-4.0,Health:-4.0,Consumer:-2.0")
+FINAL_RS_MIN_BY_GROUP: dict[str, float] = {}
+for _entry in FINAL_RS_MIN_BY_GROUP_RAW.split(","):
+    _parts = _entry.strip().split(":")
+    if len(_parts) == 2:
+        try:
+            FINAL_RS_MIN_BY_GROUP[_parts[0].strip()] = float(_parts[1].strip())
+        except ValueError:
+            pass
+
+# v2.2: Vol gate dinamico segun VIX — relaja BREAKOUT_EXTENDED_VOL_RATIO en mercados tranquilos
+VIX_LOW_LEVEL = float(os.getenv("VIX_LOW_LEVEL", "18.0"))
+BREAKOUT_EXTENDED_VOL_RATIO_LOW_VIX = float(os.getenv("BREAKOUT_EXTENDED_VOL_RATIO_LOW_VIX", "1.5"))
 ALERT_ETFS = os.getenv("ALERT_ETFS", "false").lower() == "true"
 REQUIRE_PLAYBOOK = os.getenv("REQUIRE_PLAYBOOK", "true").lower() == "true"
 TRACKER_MAX_BARS_OPEN = int(os.getenv("TRACKER_MAX_BARS_OPEN", "15"))
@@ -224,7 +242,9 @@ class StockSignal:
     def should_alert(self) -> bool:
         playbook_ok = self.signal_type in {"pullback", "breakout", "hybrid"} or not REQUIRE_PLAYBOOK
         benchmark_ok = ALERT_ETFS or self.group != "ETF"
-        rs_ok = self.group == "ETF" or self.rs20 >= FINAL_RS_MIN
+        # v2.2: RS minima por grupo — Finance/Health tienen threshold mas permisivo
+        rs_min = FINAL_RS_MIN_BY_GROUP.get(self.group, FINAL_RS_MIN)
+        rs_ok = self.group == "ETF" or self.rs20 >= rs_min
         return (
             self.score >= MIN_SCORE
             and self.rr >= MIN_RR
@@ -1170,6 +1190,8 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         warnings.append("Precio por debajo de EMA50")
 
     if symbol != "SPY":
+        # v2.2: penalty de RS reducida a la mitad para grupos con RS estructuralmente baja
+        rs_group_discount = 0.5 if group in FINAL_RS_MIN_BY_GROUP else 1.0
         if rs20 > 1.0:
             setup_score += 0.9
             reasons.append(f"RS positiva vs SPY: {rs20:+.2f}%")
@@ -1177,11 +1199,11 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
             setup_score += 0.4
             reasons.append(f"RS levemente positiva vs SPY: {rs20:+.2f}%")
         elif rs20 > -1.0:
-            setup_score -= 0.2
-            warnings.append(f"RS plana vs SPY: {rs20:+.2f}%")
+            setup_score -= 0.2 * rs_group_discount
+            warnings.append(f"RS plana vs SPY: {rs20:+.2f}% (grupo={group})")
         else:
-            setup_score -= 0.7
-            warnings.append(f"RS negativa vs SPY: {rs20:+.2f}%")
+            setup_score -= 0.7 * rs_group_discount
+            warnings.append(f"RS negativa vs SPY: {rs20:+.2f}% (grupo={group}, threshold={FINAL_RS_MIN_BY_GROUP.get(group, FINAL_RS_MIN):.1f}%)")
 
     broke_prior_high_5 = entry > prior_high_5
     broke_prior_high_20 = entry > prior_high_20
@@ -1221,12 +1243,18 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         trigger_score -= 0.4
         warnings.append(f"Volumen flojo ({vol_ratio:.2f}x)")
 
-    # v2.0: Breakout ATR Gate — breakouts extendidos sin volumen alto se penalizan
-    if pullback_atr > BREAKOUT_ATR_GATE and vol_ratio < BREAKOUT_EXTENDED_VOL_RATIO:
+    # v2.0/v2.2: Breakout ATR Gate con vol gate dinamico segun VIX
+    # VIX bajo (< VIX_LOW_LEVEL) relaja el requisito de volumen estructuralmente
+    effective_vol_gate = (
+        BREAKOUT_EXTENDED_VOL_RATIO_LOW_VIX
+        if (vix is not None and vix < VIX_LOW_LEVEL)
+        else BREAKOUT_EXTENDED_VOL_RATIO
+    )
+    if pullback_atr > BREAKOUT_ATR_GATE and vol_ratio < effective_vol_gate:
         trigger_score -= 0.7
         warnings.append(
             f"Breakout extendido sin vol suficiente ({pullback_atr:.2f} ATR, "
-            f"vol={vol_ratio:.2f}x < {BREAKOUT_EXTENDED_VOL_RATIO}x requerido)"
+            f"vol={vol_ratio:.2f}x < {effective_vol_gate:.1f}x requerido, VIX={vix})"
         )
 
     # v2.1: Volume profile filter — 3 velas de volumen decreciente = posible distribucion
