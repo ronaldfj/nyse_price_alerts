@@ -14,6 +14,31 @@ Iteración 2.1:
   === Iteracion 2.2 — Group-Aware RS Thresholds + Dynamic Vol Gate ===
 
   === Iteracion 2.3 — Backtest-Driven Calibration ===
+
+  === Iteracion 2.4 — Expanded Universe (46 simbolos) ===
+  - Tech: +AMD, CRM, NOW, ORCL, ANET
+  - Finance: +GS, AXP
+  - Health: +LLY, ABT, ISRG
+  - Consumer: +NKE, MCD
+  - Industrial: CAT, HON, DE, LMT (nuevo grupo)
+  - Energy: XOM, CVX (nuevo grupo)
+  - ETFs sectoriales: XLK, XLF, XLV, XLI, XLE, XLP
+
+  === Iteracion 2.5 — Bug Fixes + Quality Filters + Risk Sizing ===
+  BUGS:
+  - Fix #1: post-stop cooldown solo cuenta trades cerrados (no abiertos)
+  - Fix #2: alineacion temporal asset vs SPY en compute_relative_strength
+  - Fix #3: get_earnings_info con fallback robusto + advertencia visible si falla
+  - Fix #4: descarga batch de yfinance (40 simbolos en 1 request, no 40)
+  - Fix #5: cooldown lee max(state, history) — robusto a perdida de state.json
+  MEJORAS:
+  - #6:  filtro breadth de mercado — % SP500 sobre EMA200 (skip si <50%)
+  - #7:  position sizing — sugiere # acciones para riesgo de 1% sobre cuenta configurable
+  - #8:  gap filter — bloquea si gap intraday >2% vs cierre anterior (entry invalida)
+  - #9:  ranking de alertas — score * confluence_count * (1 + rs20/10)
+  - #10: correlation guard — solo 1 alerta por sector por dia (top-ranked gana)
+  - #11: trailing stop sugerido — entry + max(0.5*ATR, EMA20) como guia post-trade
+  - #12: RSI Wilder canonico documentado (alpha=1/14 vs com=13 — equivalentes)
   - Confluence threshold subido a 4 (backtest: confluence=4 -> 68.4% WR, 0.997R)
   - Hybrid playbook deshabilitado (backtest: avg_R=-0.208, stop rate 73.3%)
   - TSLA y PG excluidos del universo (TSLA avg_R=-0.086 stop=60%, PG avg_R=-0.166 stop=59%)
@@ -61,41 +86,76 @@ log = logging.getLogger("stock-sentinel-v2")
 
 # ── Universo de acciones ──────────────────────────────────────────────────────
 STOCK_NAMES = {
+    # ── Tech ──────────────────────────────────────────────────────────────
     "AAPL": "Apple Inc.",
     "MSFT": "Microsoft Corp.",
     "NVDA": "NVIDIA Corp.",
     "AMZN": "Amazon.com Inc.",
     "GOOGL": "Alphabet Inc.",
     "META": "Meta Platforms",
-    "BRK-B": "Berkshire Hathaway",
-    "V": "Visa Inc.",
-    "JPM": "JPMorgan Chase",
-    "UNH": "UnitedHealth Group",
-    "MA": "Mastercard Inc.",
     "AVGO": "Broadcom Inc.",
-    "HD": "Home Depot Inc.",
+    "AMD":  "Advanced Micro Devices",
+    "CRM":  "Salesforce Inc.",
+    "NOW":  "ServiceNow Inc.",
+    "ORCL": "Oracle Corp.",
+    "ANET": "Arista Networks",
+    # ── Finance ───────────────────────────────────────────────────────────
+    "JPM":  "JPMorgan Chase",
+    "V":    "Visa Inc.",
+    "MA":   "Mastercard Inc.",
+    "BRK-B":"Berkshire Hathaway",
+    "GS":   "Goldman Sachs",
+    "AXP":  "American Express",
+    # ── Health ────────────────────────────────────────────────────────────
+    "UNH":  "UnitedHealth Group",
+    "LLY":  "Eli Lilly & Co.",
+    "ABT":  "Abbott Laboratories",
+    "ISRG": "Intuitive Surgical",
+    # ── Consumer / Retail ─────────────────────────────────────────────────
+    "HD":   "Home Depot Inc.",
     "COST": "Costco Wholesale",
-    "SPY": "S&P 500 ETF",
-    "QQQ": "Nasdaq 100 ETF",
+    "NKE":  "Nike Inc.",
+    "MCD":  "McDonald's Corp.",
+    # ── Industrial ────────────────────────────────────────────────────────
+    "CAT":  "Caterpillar Inc.",
+    "HON":  "Honeywell Intl.",
+    "DE":   "Deere & Company",
+    "LMT":  "Lockheed Martin",
+    # ── Energy ────────────────────────────────────────────────────────────
+    "XOM":  "Exxon Mobil Corp.",
+    "CVX":  "Chevron Corp.",
+    # ── ETFs — índices ────────────────────────────────────────────────────
+    "SPY":  "S&P 500 ETF",
+    "QQQ":  "Nasdaq 100 ETF",
+    # ── ETFs — sectoriales ────────────────────────────────────────────────
+    "XLK":  "Tech Sector ETF",
+    "XLF":  "Finance Sector ETF",
+    "XLV":  "Health Sector ETF",
+    "XLI":  "Industrial Sector ETF",
+    "XLE":  "Energy Sector ETF",
+    "XLP":  "Consumer Staples ETF",
 }
 
 STOCK_GROUPS = {
-    "AAPL": "Tech",
-    "MSFT": "Tech",
-    "NVDA": "Tech",
-    "AMZN": "Tech",
-    "GOOGL": "Tech",
-    "META": "Tech",
-    "AVGO": "Tech",
-    "HD": "Consumer",
-    "COST": "Consumer",
-    "JPM": "Finance",
-    "V": "Finance",
-    "MA": "Finance",
-    "BRK-B": "Finance",
-    "UNH": "Health",
-    "SPY": "ETF",
-    "QQQ": "ETF",
+    # Tech
+    "AAPL": "Tech", "MSFT": "Tech", "NVDA": "Tech", "AMZN": "Tech",
+    "GOOGL": "Tech", "META": "Tech", "AVGO": "Tech", "AMD": "Tech",
+    "CRM": "Tech", "NOW": "Tech", "ORCL": "Tech", "ANET": "Tech",
+    # Finance
+    "JPM": "Finance", "V": "Finance", "MA": "Finance",
+    "BRK-B": "Finance", "GS": "Finance", "AXP": "Finance",
+    # Health
+    "UNH": "Health", "LLY": "Health", "ABT": "Health", "ISRG": "Health",
+    # Consumer
+    "HD": "Consumer", "COST": "Consumer", "NKE": "Consumer", "MCD": "Consumer",
+    # Industrial
+    "CAT": "Industrial", "HON": "Industrial", "DE": "Industrial", "LMT": "Industrial",
+    # Energy
+    "XOM": "Energy", "CVX": "Energy",
+    # ETF
+    "SPY": "ETF", "QQQ": "ETF",
+    "XLK": "ETF", "XLF": "ETF", "XLV": "ETF",
+    "XLI": "ETF", "XLE": "ETF", "XLP": "ETF",
 }
 STOCKS = list(STOCK_NAMES.keys())
 
@@ -127,7 +187,7 @@ FINAL_RS_MIN = float(os.getenv("FINAL_RS_MIN", "0.0"))
 
 # v2.2: RS minima por grupo — Finance/Health suelen rezagarse estructuralmente vs SPY
 # Formato: "GROUP:valor,GROUP:valor" — grupos sin entry usan FINAL_RS_MIN global
-FINAL_RS_MIN_BY_GROUP_RAW = os.getenv("FINAL_RS_MIN_BY_GROUP", "Finance:-4.0,Health:-4.0,Consumer:-2.0")
+FINAL_RS_MIN_BY_GROUP_RAW = os.getenv("FINAL_RS_MIN_BY_GROUP", "Finance:-4.0,Health:-4.0,Consumer:-2.0,Industrial:-2.0,Energy:-3.0")
 FINAL_RS_MIN_BY_GROUP: dict[str, float] = {}
 for _entry in FINAL_RS_MIN_BY_GROUP_RAW.split(","):
     _parts = _entry.strip().split(":")
@@ -141,6 +201,9 @@ for _entry in FINAL_RS_MIN_BY_GROUP_RAW.split(","):
 VIX_LOW_LEVEL = float(os.getenv("VIX_LOW_LEVEL", "18.0"))
 BREAKOUT_EXTENDED_VOL_RATIO_LOW_VIX = float(os.getenv("BREAKOUT_EXTENDED_VOL_RATIO_LOW_VIX", "1.5"))
 ALERT_ETFS = os.getenv("ALERT_ETFS", "false").lower() == "true"
+# v2.4: ETFs sectoriales alertan siempre — solo SPY/QQQ como benchmark puro se excluyen
+SECTOR_ETFS = {"XLK", "XLF", "XLV", "XLI", "XLE", "XLP"}
+INDEX_ETFS   = {"SPY", "QQQ"}
 REQUIRE_PLAYBOOK = os.getenv("REQUIRE_PLAYBOOK", "true").lower() == "true"
 TRACKER_MAX_BARS_OPEN = int(os.getenv("TRACKER_MAX_BARS_OPEN", "20"))  # v2.3: pullback expired=43% con 15
 TRACKER_ENABLED = os.getenv("TRACKER_ENABLED", "true").lower() == "true"
@@ -164,6 +227,32 @@ ADAPTIVE_RR_EXTENSION_THRESHOLD = float(os.getenv('ADAPTIVE_RR_EXTENSION_THRESHO
 ADAPTIVE_RR_MULTIPLIER = float(os.getenv('ADAPTIVE_RR_MULTIPLIER', '1.25'))
 VOLUME_PROFILE_LOOKBACK = int(os.getenv('VOLUME_PROFILE_LOOKBACK', '3'))
 VOLUME_PROFILE_PENALTY = float(os.getenv('VOLUME_PROFILE_PENALTY', '0.5'))
+
+# ── Iteracion 2.5 — Quality Filters + Risk Sizing ────────────────────────────
+# #6: Breadth filter
+BREADTH_ENABLED      = os.getenv("BREADTH_ENABLED", "true").lower() == "true"
+BREADTH_MIN_PCT      = float(os.getenv("BREADTH_MIN_PCT", "50.0"))   # % SP500 sobre EMA200
+BREADTH_BLOCK_BELOW  = float(os.getenv("BREADTH_BLOCK_BELOW", "40.0"))  # hard block bajo este nivel
+# Universo proxy para breadth (usamos los 11 ETFs sectoriales + indices ya descargados)
+# es mas eficiente que descargar los 500 simbolos del SP500.
+BREADTH_PROXY_SYMBOLS = ["XLK","XLF","XLV","XLI","XLE","XLP","XLY","XLU","XLB","XLRE","XLC"]
+
+# #7: Position sizing
+ACCOUNT_SIZE_USD     = float(os.getenv("ACCOUNT_SIZE_USD", "10000"))
+RISK_PER_TRADE_PCT   = float(os.getenv("RISK_PER_TRADE_PCT", "1.0"))  # % de cuenta por trade
+
+# #8: Gap filter
+GAP_BLOCK_PCT        = float(os.getenv("GAP_BLOCK_PCT", "2.0"))  # bloquea si |gap| > 2%
+GAP_FILTER_ENABLED   = os.getenv("GAP_FILTER_ENABLED", "true").lower() == "true"
+
+# #10: Correlation guard — solo top-ranked alerta por sector por dia
+CORRELATION_GUARD_ENABLED = os.getenv("CORRELATION_GUARD_ENABLED", "true").lower() == "true"
+
+# #4: Batch download
+BATCH_DOWNLOAD_ENABLED = os.getenv("BATCH_DOWNLOAD_ENABLED", "true").lower() == "true"
+
+# v2.5 Fix #3: tracking de simbolos donde fallo earnings — para reportarlo al final
+EARNINGS_FAILURES: set[str] = set()
 
 DEFAULT_CONTEXT_CANDIDATES = (
     os.getenv("MARKET_CONTEXT_FILE", ""),
@@ -240,14 +329,23 @@ class StockSignal:
     reasons: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     blocked: list[str] = field(default_factory=list)
+    # v2.5 nuevos campos
+    confluence_count: int = 0
+    position_size_shares: int = 0
+    position_size_usd: float = 0.0
+    risk_usd: float = 0.0
+    trailing_stop_initial: float = 0.0
+    rank_score: float = 0.0  # para ordenar multiples alertas
 
     @property
     def should_alert(self) -> bool:
         playbook_ok = self.signal_type in {"pullback", "breakout"} or not REQUIRE_PLAYBOOK  # v2.3: hybrid deshabilitado (avg_R=-0.208)
-        benchmark_ok = ALERT_ETFS or self.group != "ETF"
+        # v2.4: ETFs sectoriales siempre alertan; SPY/QQQ solo si ALERT_ETFS=true
+        benchmark_ok = ALERT_ETFS or self.symbol not in INDEX_ETFS
         # v2.2: RS minima por grupo — Finance/Health tienen threshold mas permisivo
         rs_min = FINAL_RS_MIN_BY_GROUP.get(self.group, FINAL_RS_MIN)
-        rs_ok = self.group == "ETF" or self.rs20 >= rs_min
+        # v2.4: sector ETFs y ETFs de indice omiten filtro RS (son el benchmark)
+        rs_ok = self.symbol in SECTOR_ETFS or self.symbol in INDEX_ETFS or self.rs20 >= rs_min
         return (
             self.score >= MIN_SCORE
             and self.rr >= MIN_RR
@@ -502,11 +600,31 @@ def has_exact_duplicate(sig: StockSignal, rows: list[dict[str, str]]) -> bool:
 
 
 def recent_history_timestamp(symbol: str, rows: list[dict[str, str]]) -> float:
+    """Timestamp del trade mas reciente para el simbolo (incluye abiertos).
+    Usado para cooldown estandar."""
     latest = 0.0
     for row in rows:
         if (row.get("symbol") or "").strip() != symbol:
             continue
         dt = _parse_iso_datetime(row.get("timestamp_utc", ""))
+        if dt is None:
+            continue
+        latest = max(latest, dt.timestamp())
+    return latest
+
+
+def recent_closed_stop_timestamp(symbol: str, rows: list[dict[str, str]]) -> float:
+    """v2.5 Fix #1: Timestamp del ultimo trade CERRADO POR STOP.
+    Usado solo para post-stop cooldown — evita confundir trades abiertos."""
+    latest = 0.0
+    for row in rows:
+        if (row.get("symbol") or "").strip() != symbol:
+            continue
+        status = (row.get("status") or "").strip().lower()
+        if status != "hit_stop":
+            continue
+        # usar closed_utc si existe, fallback a timestamp_utc
+        dt = _parse_iso_datetime(row.get("closed_utc", "") or row.get("timestamp_utc", ""))
         if dt is None:
             continue
         latest = max(latest, dt.timestamp())
@@ -544,22 +662,22 @@ def should_suppress_by_history(sig: StockSignal, rows: list[dict[str, str]], now
     if not HISTORY_COOLDOWN_FALLBACK:
         return False, ""
 
-    last_ts = recent_history_timestamp(sig.symbol, rows)
-    if not last_ts:
-        return False, ""
-
-    elapsed = now_ts - last_ts
-    last_exit = _last_exit_reason_for_symbol(sig.symbol, rows)
-    post_stop = "stop" in last_exit  # stop_hit, time_stop_*
-
-    if post_stop:
-        if elapsed < POST_STOP_COOLDOWN:
-            hours_left = (POST_STOP_COOLDOWN - elapsed) / 3600.0
+    # v2.5 Fix #1: post-stop cooldown usa SOLO trades cerrados por stop
+    last_stop_ts = recent_closed_stop_timestamp(sig.symbol, rows)
+    if last_stop_ts:
+        elapsed_stop = now_ts - last_stop_ts
+        if elapsed_stop < POST_STOP_COOLDOWN:
+            hours_left = (POST_STOP_COOLDOWN - elapsed_stop) / 3600.0
             return True, f"post-stop cooldown {hours_left:.1f}h restantes (72h)"
+        # cooldown vencido pero aun aplicar score elevado
         required_score = MIN_SCORE + POST_STOP_SCORE_PENALTY
         if sig.score < required_score:
-            return True, f"post-stop score insuficiente ({sig.score:.1f} < {required_score:.1f} requerido)"
-    else:
+            return True, f"post-stop score insuficiente ({sig.score:.1f} < {required_score:.1f})"
+
+    # Cooldown estandar — usa cualquier trade reciente (abierto o cerrado)
+    last_ts = recent_history_timestamp(sig.symbol, rows)
+    if last_ts:
+        elapsed = now_ts - last_ts
         if elapsed < COOLDOWN:
             hours_left = (COOLDOWN - elapsed) / 3600.0
             return True, f"cooldown CSV {hours_left:.1f}h restantes"
@@ -840,7 +958,9 @@ def get_earnings_info(symbol: str) -> tuple[Optional[str], bool]:
         return date_str, days_diff <= EARNINGS_BUFFER_DAYS
 
     except Exception as exc:
-        log.debug("%s: earnings no disponibles — %s", symbol, exc)
+        # v2.5 Fix #3: warning visible — operar sin filtro de earnings es riesgoso
+        log.warning("%s: get_earnings_info FALLO — operando SIN filtro de earnings: %s", symbol, exc)
+        EARNINGS_FAILURES.add(symbol)
         return None, False
 
 
@@ -981,7 +1101,69 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ── Descarga ──────────────────────────────────────────────────────────────────
+# v2.5 Fix #4: cache global de descargas batch
+_DATA_CACHE: dict[str, pd.DataFrame] = {}
+
+
+def batch_download(symbols: list[str], period: str = "2y") -> dict[str, pd.DataFrame]:
+    """Descarga multiples simbolos en una sola request.
+    yf.download() acepta lista de tickers y devuelve DataFrame multi-index."""
+    if not symbols:
+        return {}
+    try:
+        # group_by='ticker' para tener df.xs(symbol) accesible
+        bulk = yf.download(
+            tickers=" ".join(symbols),
+            period=period,
+            interval="1d",
+            auto_adjust=True,
+            group_by="ticker",
+            progress=False,
+            threads=True,
+        )
+    except Exception as exc:
+        log.warning("Batch download fallo: %s — fallback a descarga individual", exc)
+        return {}
+
+    result: dict[str, pd.DataFrame] = {}
+    if bulk is None or bulk.empty:
+        return result
+
+    for sym in symbols:
+        try:
+            if len(symbols) == 1:
+                df = bulk
+            else:
+                df = bulk[sym] if sym in bulk.columns.get_level_values(0) else None
+            if df is None or df.empty:
+                continue
+            df = df.dropna(subset=["High","Low","Close","Volume"])
+            if len(df) >= 220:
+                result[sym] = df
+        except Exception as exc:
+            log.debug("Batch parse %s: %s", sym, exc)
+
+    return result
+
+
+def prefetch_all_data(symbols: list[str]) -> None:
+    """Descarga todos los simbolos al inicio del scan en un batch."""
+    global _DATA_CACHE
+    if not BATCH_DOWNLOAD_ENABLED:
+        return
+    log.info("Batch download de %s simbolos...", len(symbols))
+    t0 = time.time()
+    _DATA_CACHE = batch_download(symbols)
+    elapsed = time.time() - t0
+    log.info("Batch download completado en %.1fs (%s/%s simbolos OK)",
+             elapsed, len(_DATA_CACHE), len(symbols))
+
+
 def fetch_data(symbol: str) -> Optional[pd.DataFrame]:
+    """Devuelve datos del cache o hace descarga individual como fallback."""
+    if symbol in _DATA_CACHE:
+        return _DATA_CACHE[symbol]
+
     try:
         df = yf.Ticker(symbol).history(period="2y", interval="1d", auto_adjust=True)
     except Exception as exc:
@@ -990,7 +1172,7 @@ def fetch_data(symbol: str) -> Optional[pd.DataFrame]:
 
     required = {"High", "Low", "Close", "Volume"}
     if df is None or df.empty or not required.issubset(df.columns):
-        log.warning("%s: datos inválidos", symbol)
+        log.warning("%s: datos invalidos", symbol)
         return None
 
     df = df.dropna(subset=list(required))
@@ -998,21 +1180,91 @@ def fetch_data(symbol: str) -> Optional[pd.DataFrame]:
         log.warning("%s: pocas velas (%s < 220)", symbol, len(df))
         return None
 
+    _DATA_CACHE[symbol] = df
     return df
 
 
 # ── Helpers cuantitativos ─────────────────────────────────────────────────────
 def compute_relative_strength(df: pd.DataFrame, spy_df: Optional[pd.DataFrame]) -> float:
+    """v2.5 Fix #2: alineacion temporal asset vs SPY antes de calcular ratio.
+    Si las fechas no coinciden (holidays, IPOs recientes, etc), usar interseccion."""
     if spy_df is None or len(df) < RS_LOOKBACK + 2 or len(spy_df) < RS_LOOKBACK + 2:
         return 0.0
 
-    asset_ret = (float(df["Close"].iloc[-2]) / float(df["Close"].iloc[-2 - RS_LOOKBACK]) - 1.0) * 100
-    spy_ret = (float(spy_df["Close"].iloc[-2]) / float(spy_df["Close"].iloc[-2 - RS_LOOKBACK]) - 1.0) * 100
+    # Alinear por indice — usar solo fechas comunes
+    common_idx = df.index.intersection(spy_df.index)
+    if len(common_idx) < RS_LOOKBACK + 2:
+        return 0.0
+
+    asset_aligned = df["Close"].reindex(common_idx)
+    spy_aligned   = spy_df["Close"].reindex(common_idx)
+
+    asset_ret = (float(asset_aligned.iloc[-2]) / float(asset_aligned.iloc[-2 - RS_LOOKBACK]) - 1.0) * 100
+    spy_ret   = (float(spy_aligned.iloc[-2])   / float(spy_aligned.iloc[-2 - RS_LOOKBACK])   - 1.0) * 100
     return round(asset_ret - spy_ret, 2)
 
 
+# ── v2.5 #6: Breadth filter ──────────────────────────────────────────────────
+def compute_market_breadth() -> Optional[float]:
+    """% de simbolos del proxy SP500 (ETFs sectoriales) sobre su EMA200.
+    Returns None si no hay datos suficientes."""
+    if not BREADTH_ENABLED:
+        return None
+
+    above = 0
+    total = 0
+    for sym in BREADTH_PROXY_SYMBOLS:
+        df = fetch_data(sym)
+        if df is None or len(df) < 200:
+            continue
+        ema200 = df["Close"].ewm(span=200, adjust=False).mean()
+        last_close = float(df["Close"].iloc[-2])
+        last_ema   = float(ema200.iloc[-2])
+        if last_close > last_ema:
+            above += 1
+        total += 1
+
+    if total == 0:
+        return None
+    pct = (above / total) * 100.0
+    log.info("Breadth proxy: %s/%s ETFs sectoriales sobre EMA200 (%.1f%%)", above, total, pct)
+    return round(pct, 1)
+
+
+# ── v2.5 #7: Position sizing ─────────────────────────────────────────────────
+def compute_position_size(entry: float, stop: float) -> tuple[int, float, float]:
+    """Calcula # acciones, $ posicion, $ riesgo basado en RISK_PER_TRADE_PCT.
+    Returns (shares, position_usd, risk_usd)."""
+    risk_per_share = max(entry - stop, 0.01)
+    risk_budget    = ACCOUNT_SIZE_USD * (RISK_PER_TRADE_PCT / 100.0)
+    shares = int(risk_budget / risk_per_share)
+    position_usd = shares * entry
+    risk_usd     = shares * risk_per_share
+    return shares, round(position_usd, 2), round(risk_usd, 2)
+
+
+# ── v2.5 #8: Gap filter ──────────────────────────────────────────────────────
+def detect_overnight_gap(df: pd.DataFrame) -> tuple[float, bool]:
+    """Detecta gap entre cierre de N-1 y apertura de N (ultima barra).
+    Returns (gap_pct, blocked)."""
+    if not GAP_FILTER_ENABLED or len(df) < 2:
+        return 0.0, False
+    prev_close = float(df["Close"].iloc[-2])
+    today_open = float(df["Open"].iloc[-1])
+    gap_pct = abs((today_open - prev_close) / max(prev_close, 1e-9)) * 100.0
+    blocked = gap_pct > GAP_BLOCK_PCT
+    return round(gap_pct, 2), blocked
+
+
+# ── v2.5 #11: Trailing stop sugerido ─────────────────────────────────────────
+def compute_trailing_stop_initial(entry: float, atr: float, ema20: float) -> float:
+    """Stop de trailing inicial sugerido para post-trade.
+    Mas ajustado que el stop estructural — para mover una vez la posicion este ITM."""
+    return round(max(ema20, entry - 1.5 * atr), 2)
+
+
 # ── Evaluación ────────────────────────────────────────────────────────────────
-def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df: Optional[pd.DataFrame]) -> Optional[StockSignal]:
+def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df: Optional[pd.DataFrame], breadth_pct: Optional[float] = None) -> Optional[StockSignal]:
     df = fetch_data(symbol)
     if df is None:
         return None
@@ -1071,6 +1323,19 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
 
     if vix is not None and vix >= VIX_BLOCK_LEVEL:
         blocked.append(f"VIX={vix:.1f} — mercado en pánico")
+
+    # v2.5 #6: breadth filter — si <BREADTH_BLOCK_BELOW% del SP500 sobre EMA200, hard block
+    if breadth_pct is not None:
+        if breadth_pct < BREADTH_BLOCK_BELOW:
+            blocked.append(f"Breadth pobre ({breadth_pct:.1f}% < {BREADTH_BLOCK_BELOW}%) — mercado debil")
+        elif breadth_pct < BREADTH_MIN_PCT:
+            warnings.append(f"Breadth limitada ({breadth_pct:.1f}% < {BREADTH_MIN_PCT}%)")
+            setup_score -= 0.3
+
+    # v2.5 #8: gap filter — si gap intraday >GAP_BLOCK_PCT, el setup tecnico es invalido
+    gap_pct, gap_blocked = detect_overnight_gap(df)
+    if gap_blocked:
+        blocked.append(f"Gap overnight {gap_pct:.1f}% > {GAP_BLOCK_PCT}% — entry invalida")
 
     if sym_context.get("hard_block_long"):
         blocked.append(f"Bloqueo manual: {sym_context.get('note', 'sin nota')}")
@@ -1192,8 +1457,8 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         setup_score -= 0.2
         warnings.append("Precio por debajo de EMA50")
 
-    if symbol != "SPY":
-        # v2.2: penalty de RS reducida a la mitad para grupos con RS estructuralmente baja
+    if symbol not in INDEX_ETFS and symbol not in SECTOR_ETFS:
+        # v2.2/v2.4: RS discount para grupos con lag estructural; ETFs sectoriales omiten comparacion
         rs_group_discount = 0.5 if group in FINAL_RS_MIN_BY_GROUP else 1.0
         if rs20 > 1.0:
             setup_score += 0.9
@@ -1447,6 +1712,12 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
                 f"(extension={extension_pct:.1f}% > {ADAPTIVE_RR_EXTENSION_THRESHOLD}%)"
             )
 
+    # v2.5: position sizing + trailing stop sugerido + ranking score
+    shares, pos_usd, risk_usd = compute_position_size(entry, stop)
+    trailing_initial = compute_trailing_stop_initial(entry, atr, ema20)
+    # ranking: score ponderado por confluence + RS positiva (boost)
+    rank = total_score * (1 + confluence_count * 0.15) * (1 + max(rs20, 0) / 20)
+
     return StockSignal(
         symbol=symbol,
         name=name,
@@ -1472,6 +1743,13 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         reasons=reasons,
         warnings=warnings,
         blocked=blocked,
+        # v2.5 nuevos campos
+        confluence_count=confluence_count,
+        position_size_shares=shares,
+        position_size_usd=pos_usd,
+        risk_usd=risk_usd,
+        trailing_stop_initial=trailing_initial,
+        rank_score=round(rank, 2),
     )
 
 
@@ -1498,21 +1776,36 @@ def format_alert(sig: StockSignal, vix: Optional[float]) -> str:
 
     confluences = "\n".join(f"  • {reason}" for reason in sig.reasons[:8])
 
+    # v2.5: bloque de sizing + trailing stop
+    sizing_block = ""
+    if sig.position_size_shares > 0:
+        sizing_block = (
+            f"\n💼 *Sizing sugerido* (cuenta=${ACCOUNT_SIZE_USD:,.0f}, riesgo={RISK_PER_TRADE_PCT}%)\n"
+            f"  • Acciones: {sig.position_size_shares}\n"
+            f"  • Posicion: ${sig.position_size_usd:,.2f}\n"
+            f"  • Riesgo: ${sig.risk_usd:.2f}\n"
+            f"  • Trailing stop sugerido: ${sig.trailing_stop_initial:.2f}\n"
+        )
+
+    confluence_line = f"🔗 *Confluence count:* {sig.confluence_count}/5\n" if sig.confluence_count > 0 else ""
+
     return (
-        f"{score_emoji} *ALERTA BOLSA v2.5: {sig.name} ({sig.symbol})*\n\n"
+        f"{score_emoji} *ALERTA BOLSA v2.6: {sig.name} ({sig.symbol})*\n\n"
         f"💰 *Precio:* ${sig.price:.2f}\n"
-        f"📊 *Score:* {sig.score:.1f}\n"
+        f"📊 *Score:* {sig.score:.1f} | *Rank:* {sig.rank_score:.2f}\n"
         f"⚖️ *R:R estructural:* {sig.rr:.2f}x\n"
         f"📏 *ATR:* ${sig.atr:.2f} | *ADX:* {sig.adx:.1f} | *RSI:* {sig.rsi:.1f}\n"
         f"{supertrend_line}"
         f"{signal_breakdown}"
+        f"{confluence_line}"
         f"{signal_type_line}"
         f"{trigger_line}"
         f"{rs_line}"
         f"{vix_line}"
-        f"{earnings_line}\n"
-        f"🎯 *TARGET:* ${sig.tp:.2f}\n"
-        f"🛑 *STOP:* ${sig.stop:.2f}\n\n"
+        f"{earnings_line}"
+        f"\n🎯 *TARGET:* ${sig.tp:.2f}\n"
+        f"🛑 *STOP:* ${sig.stop:.2f}"
+        f"{sizing_block}\n"
         f"📝 *Confluencias:*\n{confluences}"
         f"{warnings_block}"
     )
@@ -1536,31 +1829,26 @@ def main() -> None:
     history_rows = load_alert_history_rows()
 
     mode = "DRY RUN" if DRY_RUN else "PRODUCCIÓN"
-    log.info("Iniciando escaneo v2 [%s] — %s acciones", mode, len(STOCKS))
-    log.info("Histórico CSV: %s", ALERTS_HISTORY_FILE)
+    log.info("Iniciando escaneo v2.6 [%s] — %s simbolos", mode, len(STOCKS))
+    log.info("Historico CSV: %s", ALERTS_HISTORY_FILE)
 
     tracker_stats = update_alert_history_tracker()
     if tracker_stats["open_checked"] > 0:
         log.info(
-            "Tracker histórico | Revisadas:%s | Target:%s | Stop:%s | Expiradas:%s | Abiertas:%s | Inválidas:%s",
-            tracker_stats["open_checked"],
-            tracker_stats["hit_target"],
-            tracker_stats["hit_stop"],
-            tracker_stats["expired"],
-            tracker_stats["still_open"],
-            tracker_stats["invalid"],
+            "Tracker historico | Revisadas:%s | Target:%s | Stop:%s | Expiradas:%s | Abiertas:%s | Invalidas:%s",
+            tracker_stats["open_checked"], tracker_stats["hit_target"], tracker_stats["hit_stop"],
+            tracker_stats["expired"], tracker_stats["still_open"], tracker_stats["invalid"],
         )
         history_rows = load_alert_history_rows()
 
+    # v2.5 Fix #4: batch download al inicio — todos los simbolos + breadth proxies + SPY/VIX
+    all_symbols_to_fetch = list(set(STOCKS + BREADTH_PROXY_SYMBOLS + ["SPY"]))
+    prefetch_all_data(all_symbols_to_fetch)
+
     vix = fetch_vix()
     if vix is not None:
-        if vix >= VIX_BLOCK_LEVEL:
-            vix_status = "PÁNICO"
-        elif vix >= VIX_CAUTION_LEVEL:
-            vix_status = "NERVIOSO"
-        else:
-            vix_status = "NORMAL"
-        log.info("VIX=%.1f — condición de mercado: %s", vix, vix_status)
+        vix_status = "PANICO" if vix >= VIX_BLOCK_LEVEL else ("NERVIOSO" if vix >= VIX_CAUTION_LEVEL else "NORMAL")
+        log.info("VIX=%.1f — condicion de mercado: %s", vix, vix_status)
     else:
         log.warning("VIX no disponible — se omite filtro macro")
 
@@ -1568,7 +1856,15 @@ def main() -> None:
     if spy_df is None:
         log.warning("SPY no disponible — se omite relative strength benchmark")
 
-    stats = {k: 0 for k in ("scanned", "cooldown", "no_data", "blocked", "duplicate", "no_signal", "alerts")}
+    # v2.5 #6: breadth filter — calcular una sola vez para todo el scan
+    breadth_pct = compute_market_breadth()
+
+    stats = {k: 0 for k in ("scanned", "cooldown", "no_data", "blocked", "duplicate", "no_signal", "alerts", "corr_guard", "ranked_skip")}
+
+    # ========================================================================
+    # FASE 1: Recolectar candidatos validos (sin alertar todavia)
+    # ========================================================================
+    candidates: list[StockSignal] = []
 
     for symbol in STOCKS:
         last_alert_state = float(state.get(symbol, 0) or 0)
@@ -1583,7 +1879,7 @@ def main() -> None:
         stats["scanned"] += 1
         try:
             sym_context = get_symbol_context(context, symbol)
-            sig = evaluate_stock(symbol, sym_context, vix, spy_df)
+            sig = evaluate_stock(symbol, sym_context, vix, spy_df, breadth_pct)
 
             if sig is None:
                 stats["no_data"] += 1
@@ -1593,81 +1889,92 @@ def main() -> None:
             if sig.blocked:
                 stats["blocked"] += 1
                 log.info(
-                    "%s: score=%.1f | RR=%.2f | regime/setup/trigger=%.1f/%.1f/%.1f | BLOQUEADO | %s",
-                    sig.symbol,
-                    sig.score,
-                    sig.rr,
-                    sig.regime_score,
-                    sig.setup_score,
-                    sig.trigger_score,
-                    format_reject_log(sig),
+                    "%s: score=%.1f | RR=%.2f | r/s/t=%.1f/%.1f/%.1f | BLOQUEADO | %s",
+                    sig.symbol, sig.score, sig.rr, sig.regime_score, sig.setup_score,
+                    sig.trigger_score, format_reject_log(sig),
                 )
-            elif sig.should_alert:
+                continue
+
+            if sig.should_alert:
+                # Verificar cooldown / duplicado antes de añadir a candidatos
                 suppress, reason = should_suppress_by_history(sig, history_rows, now)
                 if suppress:
                     stats["duplicate"] += 1
-                    log.info(
-                        "🛡️ DUPLICADA %s | score=%.1f | RR=%.2f | playbook=%s | %s",
-                        sig.symbol,
-                        sig.score,
-                        sig.rr,
-                        sig.signal_type,
-                        reason,
-                    )
+                    log.info("🛡️ DUPLICADA %s | %s", sig.symbol, reason)
                     continue
-
-                if send_telegram(format_alert(sig, vix)):
-                    append_alert_history(sig, vix)
-                    history_rows = load_alert_history_rows()
-                    state[sig.symbol] = now
-                    save_state(state)
-                    stats["alerts"] += 1
-                    log.info(
-                        "✅ ALERTA %s | score=%.1f | RR=%.2f | playbook=%s | RS20=%+.2f%% | trigger=%s",
-                        sig.symbol,
-                        sig.score,
-                        sig.rr,
-                        sig.signal_type,
-                        sig.rs20,
-                        sig.trigger_candle_utc,
-                    )
+                candidates.append(sig)
             else:
                 stats["no_signal"] += 1
                 log.info(
-                    "%s: score=%.1f | RR=%.2f | regime/setup/trigger=%.1f/%.1f/%.1f | sin señal | %s",
-                    sig.symbol,
-                    sig.score,
-                    sig.rr,
-                    sig.regime_score,
-                    sig.setup_score,
-                    sig.trigger_score,
-                    format_reject_log(sig),
+                    "%s: score=%.1f | RR=%.2f | r/s/t=%.1f/%.1f/%.1f | sin senal | %s",
+                    sig.symbol, sig.score, sig.rr, sig.regime_score, sig.setup_score,
+                    sig.trigger_score, format_reject_log(sig),
                 )
 
-            time.sleep(1.5)
-
         except Exception as exc:
-            log.error("%s: excepción — %s", symbol, exc, exc_info=True)
+            log.error("%s: excepcion — %s", symbol, exc, exc_info=True)
+
+    # ========================================================================
+    # FASE 2: Rankear candidatos + correlation guard + emitir alertas
+    # ========================================================================
+    if candidates:
+        # v2.5 #9: rankear por rank_score descendente
+        candidates.sort(key=lambda s: s.rank_score, reverse=True)
+        log.info("Candidatos pre-ranking: %s", [(c.symbol, c.rank_score) for c in candidates])
+
+        # v2.5 #10: correlation guard — solo top 1 por sector
+        sectors_used: set[str] = set()
+        approved: list[StockSignal] = []
+        for sig in candidates:
+            if CORRELATION_GUARD_ENABLED and sig.group in sectors_used:
+                stats["corr_guard"] += 1
+                log.info(
+                    "🔗 CORR GUARD %s (grupo=%s ya tiene alerta de mayor rank)",
+                    sig.symbol, sig.group,
+                )
+                continue
+            approved.append(sig)
+            sectors_used.add(sig.group)
+
+        # Emitir alertas finales
+        for sig in approved:
+            if send_telegram(format_alert(sig, vix)):
+                append_alert_history(sig, vix)
+                history_rows = load_alert_history_rows()
+                state[sig.symbol] = now
+                save_state(state)
+                stats["alerts"] += 1
+                log.info(
+                    "✅ ALERTA %s | score=%.1f | rank=%.2f | confluence=%s/5 | RR=%.2f | playbook=%s | RS20=%+.2f%%",
+                    sig.symbol, sig.score, sig.rank_score, sig.confluence_count,
+                    sig.rr, sig.signal_type, sig.rs20,
+                )
+
+    # v2.5 Fix #3: reportar simbolos donde fallo earnings
+    if EARNINGS_FAILURES:
+        log.warning(
+            "EARNINGS NO DISPONIBLES para %s simbolos (operando sin filtro): %s",
+            len(EARNINGS_FAILURES), sorted(EARNINGS_FAILURES),
+        )
 
     log.info(
-        "Escaneo completado | Escaneados:%s | Cooldown:%s | Sin datos:%s | Bloqueados:%s | Duplicadas:%s | Sin señal:%s | Alertas:%s",
-        stats["scanned"],
-        stats["cooldown"],
-        stats["no_data"],
-        stats["blocked"],
-        stats["duplicate"],
-        stats["no_signal"],
-        stats["alerts"],
+        "Escaneo v2.6 completado | Escaneados:%s | Cooldown:%s | Sin datos:%s | Bloqueados:%s | "
+        "Duplicadas:%s | Sin senal:%s | CorrGuard:%s | Alertas:%s",
+        stats["scanned"], stats["cooldown"], stats["no_data"], stats["blocked"],
+        stats["duplicate"], stats["no_signal"], stats["corr_guard"], stats["alerts"],
     )
 
     if not DRY_RUN:
         vix_summary = f"📉 VIX: {vix:.1f}\n" if vix is not None else ""
+        breadth_summary = f"🌐 Breadth: {breadth_pct:.1f}%\n" if breadth_pct is not None else ""
         send_telegram(
-            f"📋 *Resumen escaneo bolsa*\n\n"
+            f"📋 *Resumen escaneo bolsa v2.6*\n\n"
             f"{vix_summary}"
+            f"{breadth_summary}"
             f"✅ Alertas enviadas: {stats['alerts']}\n"
+            f"🔗 Bloqueadas por correlacion: {stats['corr_guard']}\n"
             f"🛡️ Duplicadas bloqueadas: {stats['duplicate']}\n"
-            f"○ Sin señal: {stats['no_signal']}\n"
+            f"○ Sin senal: {stats['no_signal']}\n"
             f"⚠️ Bloqueadas: {stats['blocked']}\n"
             f"💤 En cooldown: {stats['cooldown']}\n"
             f"❌ Sin datos: {stats['no_data']}"
