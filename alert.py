@@ -12,6 +12,13 @@ Iteración 2.1:
   === Iteracion 2.1 — Multi-Signal Confluence + Adaptive Scoring ===
 
   === Iteracion 2.2 — Group-Aware RS Thresholds + Dynamic Vol Gate ===
+
+  === Iteracion 2.3 — Backtest-Driven Calibration ===
+  - Confluence threshold subido a 4 (backtest: confluence=4 -> 68.4% WR, 0.997R)
+  - Hybrid playbook deshabilitado (backtest: avg_R=-0.208, stop rate 73.3%)
+  - TSLA y PG excluidos del universo (TSLA avg_R=-0.086 stop=60%, PG avg_R=-0.166 stop=59%)
+  - TRACKER_MAX_BARS_OPEN=20 para capturar mas pullbacks (expired=43% en pullback)
+  - Confluence=5 penaliza en vez de bonificar (backtest: 0% WR, avg_R=-0.543)
   - CONFLUENCE_BONUS: score +0.5 cuando >=3 confluencias de entrada activas
   - TREND_QUALITY_SCORE: ratio DI+/(DI++DI-) pondera regime_score de forma continua
   - Adaptive MIN_RR: sube a MIN_RR * 1.25 si extension_pct > 20
@@ -60,7 +67,6 @@ STOCK_NAMES = {
     "AMZN": "Amazon.com Inc.",
     "GOOGL": "Alphabet Inc.",
     "META": "Meta Platforms",
-    "TSLA": "Tesla, Inc.",
     "BRK-B": "Berkshire Hathaway",
     "V": "Visa Inc.",
     "JPM": "JPMorgan Chase",
@@ -68,7 +74,6 @@ STOCK_NAMES = {
     "MA": "Mastercard Inc.",
     "AVGO": "Broadcom Inc.",
     "HD": "Home Depot Inc.",
-    "PG": "Procter & Gamble",
     "COST": "Costco Wholesale",
     "SPY": "S&P 500 ETF",
     "QQQ": "Nasdaq 100 ETF",
@@ -82,9 +87,7 @@ STOCK_GROUPS = {
     "GOOGL": "Tech",
     "META": "Tech",
     "AVGO": "Tech",
-    "TSLA": "Consumer",
     "HD": "Consumer",
-    "PG": "Consumer",
     "COST": "Consumer",
     "JPM": "Finance",
     "V": "Finance",
@@ -103,7 +106,7 @@ STATE_FILE = os.getenv("STOCK_STATE_FILE", "stock_state.json")
 ALERTS_HISTORY_FILE = os.getenv("ALERTS_HISTORY_FILE", "alerts_history.csv")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
-MIN_SCORE = float(os.getenv("MIN_SCORE", "5.5"))
+MIN_SCORE = float(os.getenv("MIN_SCORE", "5.8"))
 MIN_RR = float(os.getenv("MIN_RR", "1.6"))
 COOLDOWN = int(os.getenv("COOLDOWN_HOURS", "48")) * 3600
 EARNINGS_BUFFER_DAYS = int(os.getenv("EARNINGS_BUFFER_DAYS", "5"))
@@ -117,7 +120,7 @@ RS_LOOKBACK = int(os.getenv("RS_LOOKBACK", "20"))
 SWING_LOOKBACK = int(os.getenv("SWING_LOOKBACK", "12"))
 PULLBACK_MAX_ATR = float(os.getenv("PULLBACK_MAX_ATR", "1.20"))
 BREAKOUT_MAX_ATR = float(os.getenv("BREAKOUT_MAX_ATR", "3.20"))
-WEAK_ADX_BLOCK = float(os.getenv("WEAK_ADX_BLOCK", "13.0"))
+WEAK_ADX_BLOCK = float(os.getenv("WEAK_ADX_BLOCK", "15.0"))
 BREAKOUT_RS_MIN = float(os.getenv("BREAKOUT_RS_MIN", "-0.5"))
 BREAKOUT_NEAR_PCT = float(os.getenv("BREAKOUT_NEAR_PCT", "0.995"))
 FINAL_RS_MIN = float(os.getenv("FINAL_RS_MIN", "0.0"))
@@ -139,7 +142,7 @@ VIX_LOW_LEVEL = float(os.getenv("VIX_LOW_LEVEL", "18.0"))
 BREAKOUT_EXTENDED_VOL_RATIO_LOW_VIX = float(os.getenv("BREAKOUT_EXTENDED_VOL_RATIO_LOW_VIX", "1.5"))
 ALERT_ETFS = os.getenv("ALERT_ETFS", "false").lower() == "true"
 REQUIRE_PLAYBOOK = os.getenv("REQUIRE_PLAYBOOK", "true").lower() == "true"
-TRACKER_MAX_BARS_OPEN = int(os.getenv("TRACKER_MAX_BARS_OPEN", "15"))
+TRACKER_MAX_BARS_OPEN = int(os.getenv("TRACKER_MAX_BARS_OPEN", "20"))  # v2.3: pullback expired=43% con 15
 TRACKER_ENABLED = os.getenv("TRACKER_ENABLED", "true").lower() == "true"
 HISTORY_COOLDOWN_FALLBACK = os.getenv("HISTORY_COOLDOWN_FALLBACK", "true").lower() == "true"
 SUPERTREND_PERIOD = int(os.getenv("SUPERTREND_PERIOD", "10"))
@@ -155,8 +158,8 @@ SLOPE_CONSISTENCY_RATIO = float(os.getenv('SLOPE_CONSISTENCY_RATIO', '0.3'))
 SLOPE_WEAK_PENALTY = float(os.getenv('SLOPE_WEAK_PENALTY', '0.4'))
 
 # -- Iteracion 2.1 -- Multi-Signal Confluence + Adaptive Scoring -------------
-CONFLUENCE_THRESHOLD = int(os.getenv('CONFLUENCE_THRESHOLD', '3'))
-CONFLUENCE_BONUS = float(os.getenv('CONFLUENCE_BONUS', '0.5'))
+CONFLUENCE_THRESHOLD = int(os.getenv('CONFLUENCE_THRESHOLD', '4'))  # v2.3: backtest confluence=4 -> 68.4% WR
+CONFLUENCE_BONUS = float(os.getenv('CONFLUENCE_BONUS', '0.8'))  # v2.3: subido de 0.5
 ADAPTIVE_RR_EXTENSION_THRESHOLD = float(os.getenv('ADAPTIVE_RR_EXTENSION_THRESHOLD', '20.0'))
 ADAPTIVE_RR_MULTIPLIER = float(os.getenv('ADAPTIVE_RR_MULTIPLIER', '1.25'))
 VOLUME_PROFILE_LOOKBACK = int(os.getenv('VOLUME_PROFILE_LOOKBACK', '3'))
@@ -240,7 +243,7 @@ class StockSignal:
 
     @property
     def should_alert(self) -> bool:
-        playbook_ok = self.signal_type in {"pullback", "breakout", "hybrid"} or not REQUIRE_PLAYBOOK
+        playbook_ok = self.signal_type in {"pullback", "breakout"} or not REQUIRE_PLAYBOOK  # v2.3: hybrid deshabilitado (avg_R=-0.208)
         benchmark_ok = ALERT_ETFS or self.group != "ETF"
         # v2.2: RS minima por grupo — Finance/Health tienen threshold mas permisivo
         rs_min = FINAL_RS_MIN_BY_GROUP.get(self.group, FINAL_RS_MIN)
@@ -1322,7 +1325,11 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     elif is_hybrid:
         signal_type = "hybrid"
         trigger_score += 0.9
-        reasons.append("Playbook activo: Early Expansion / Hybrid")
+        # v2.3: hybrid penalizado — backtest avg_R=-0.208, stop rate 73.3%
+        # Se detecta para logging pero se bloquea en should_alert
+        score_adjustment -= 1.5
+        warnings.append("Playbook hybrid deshabilitado (backtest: stop rate 73.3%)")
+        reasons.append("Playbook: Early Expansion / Hybrid (penalizado)")
 
     if signal_type == "none":
         setup_score -= 0.7
@@ -1333,7 +1340,8 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         score_adjustment -= 0.5
         reasons.append(f"VIX elevado ({vix:.1f})")
 
-    # v2.1: Confluence bonus — suma si hay >= CONFLUENCE_THRESHOLD senales de entrada activas
+    # v2.1/v2.3: Confluence scoring calibrado por backtest
+    # confluence=4 -> 68.4% WR, 0.997R | confluence=5 -> 0% WR, -0.543R (sobreextension)
     confluence_signals = [
         broke_prior_high_5,
         bullish_reclaim,
@@ -1342,9 +1350,16 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         vol_ratio >= TRIGGER_VOL_RATIO,
     ]
     confluence_count = sum(bool(s) for s in confluence_signals)
-    if confluence_count >= CONFLUENCE_THRESHOLD:
+    if confluence_count == 4:
         score_adjustment += CONFLUENCE_BONUS
-        reasons.append(f"Confluencia de entrada ({confluence_count}/5 senales activas) +{CONFLUENCE_BONUS}")
+        reasons.append(f"Confluencia optima (4/5 senales) +{CONFLUENCE_BONUS}")
+    elif confluence_count == 5:
+        # v2.3: backtest muestra 0% WR en confluence=5 — sobreextension / chasing
+        score_adjustment -= 0.6
+        warnings.append("Confluencia maxima (5/5) — posible chasing, penalizacion aplicada")
+    elif confluence_count >= CONFLUENCE_THRESHOLD:
+        score_adjustment += CONFLUENCE_BONUS * 0.5
+        reasons.append(f"Confluencia parcial ({confluence_count}/5 senales) +{CONFLUENCE_BONUS*0.5:.1f}")
 
     total_score = round(regime_score + setup_score + trigger_score + score_adjustment, 2)
     if score_adjustment != 0:
