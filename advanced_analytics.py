@@ -46,6 +46,7 @@ class Settings:
     slippage_pct: float
     mc_runs: int
     rolling_window_trades: int
+    filter_playbook: str = ""
 
 
 # ── Carga + normalizacion ───────────────────────────────────────────────────
@@ -163,9 +164,13 @@ def build_equity_curve(df: pd.DataFrame, realized_r: pd.Series, settings: Settin
     return eq_df
 
 
-# ── Monte Carlo: reordenar trades ─────────────────────────────────────────
+# ── Monte Carlo: bootstrap (sample CON reemplazo) ──────────────────────────
 def monte_carlo_reorder(realized_r: pd.Series, settings: Settings, n_runs: int = 1000) -> pd.DataFrame:
-    """Reordena trades aleatoriamente N veces y calcula drawdowns / equity finales."""
+    """Bootstrap: muestrea N trades CON reemplazo de la distribucion empirica.
+    Bug fix v2: con compounding fijo, una simple permutacion da el mismo capital
+    final (la multiplicacion es conmutativa). El verdadero Monte Carlo requiere
+    bootstrap — cada run puede tener trades repetidos o ausentes, generando
+    distribuciones reales de equity y drawdown."""
     rng = np.random.default_rng(seed=42)
     r_array = realized_r.dropna().values
     n_trades = len(r_array)
@@ -175,14 +180,16 @@ def monte_carlo_reorder(realized_r: pd.Series, settings: Settings, n_runs: int =
 
     results = []
     for run in range(n_runs):
-        permuted = rng.permutation(r_array)
+        # Bootstrap: sample CON reemplazo, mismo n_trades
+        sampled = rng.choice(r_array, size=n_trades, replace=True)
+
         capital = settings.initial_capital
         peak = capital
         max_dd = 0.0
         consec_losses = 0
         max_consec_losses = 0
 
-        for r in permuted:
+        for r in sampled:
             risk_amount = capital * (settings.risk_per_trade_pct / 100.0)
             capital += r * risk_amount
             peak = max(peak, capital)
@@ -429,6 +436,8 @@ def parse_args() -> Settings:
     p.add_argument("--slippage-pct", type=float, default=0.05)
     p.add_argument("--mc-runs", type=int, default=1000)
     p.add_argument("--rolling-window", type=int, default=30)
+    p.add_argument("--filter-playbook", type=str, default="",
+                   help="Filtrar por playbook: 'breakout', 'pullback', 'hybrid', o vacio (todos)")
     args = p.parse_args()
 
     return Settings(
@@ -440,6 +449,7 @@ def parse_args() -> Settings:
         slippage_pct=args.slippage_pct,
         mc_runs=args.mc_runs,
         rolling_window_trades=args.rolling_window,
+        filter_playbook=args.filter_playbook.strip().lower(),
     )
 
 
@@ -451,6 +461,19 @@ def main() -> None:
     if df.empty:
         log.warning("Sin trades cerrados — no se puede analizar")
         return
+
+    # Filtro por playbook (Fase B)
+    if settings.filter_playbook:
+        if "playbook" not in df.columns:
+            log.warning("Columna 'playbook' no encontrada — filtro ignorado")
+        else:
+            before = len(df)
+            df = df[df["playbook"].astype(str).str.strip().str.lower() == settings.filter_playbook].copy()
+            df = df.reset_index(drop=True)
+            log.info("Filtro playbook='%s': %s/%s trades", settings.filter_playbook, len(df), before)
+            if df.empty:
+                log.warning("Sin trades para playbook='%s'", settings.filter_playbook)
+                return
 
     realized_r = compute_realized_r(df)
     realized_r_with_costs = apply_costs(realized_r, df, settings)
