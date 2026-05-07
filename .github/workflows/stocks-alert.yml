@@ -209,6 +209,18 @@ jobs:
               --mc-runs 1000 || echo "Pocos trades para analytics live, omitido"
           fi
 
+      - name: Comparacion de playbooks (Fase B)
+        if: always()
+        run: |
+          python compare_playbooks.py \
+            --input backtest_output/backtest_trades.csv \
+            --outdir backtest_output/playbook_comparison \
+            --capital 10000 \
+            --risk-pct 1.0 \
+            --commission 1.0 \
+            --slippage-pct 0.05 \
+            --mc-runs 2000
+
       - name: Subir resultados del backtest
         if: always()
         uses: actions/upload-artifact@v4.6.2
