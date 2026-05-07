@@ -113,3 +113,7 @@ jobs:
           git add stock_state.json alerts_history.csv
           git diff --cached --quiet || git commit -m "chore: update stock scanner state and alert history"
           git push
+
+      - name: Backtest on-demand
+        if: github.event_name == 'workflow_dispatch'
+        run: python backtest.py --years 3 --export-features
