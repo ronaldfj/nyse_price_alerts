@@ -185,6 +185,30 @@ jobs:
         run: |
           python backtest.py --years 3 --export-features
 
+      - name: Advanced analytics sobre backtest
+        if: always()
+        run: |
+          python advanced_analytics.py \
+            --input backtest_output/backtest_trades.csv \
+            --outdir backtest_output/analytics \
+            --capital 10000 \
+            --risk-pct 1.0 \
+            --commission 1.0 \
+            --slippage-pct 0.05 \
+            --mc-runs 2000 \
+            --rolling-window 30
+
+      - name: Advanced analytics sobre live
+        if: always()
+        run: |
+          if [ -s alerts_history.csv ]; then
+            python advanced_analytics.py \
+              --input alerts_history.csv \
+              --outdir backtest_output/analytics_live \
+              --capital 10000 \
+              --mc-runs 1000 || echo "Pocos trades para analytics live, omitido"
+          fi
+
       - name: Subir resultados del backtest
         if: always()
         uses: actions/upload-artifact@v4.6.2
