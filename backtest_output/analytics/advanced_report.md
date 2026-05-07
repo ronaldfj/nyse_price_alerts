@@ -8,8 +8,8 @@
 
 ## Equity Curve (con compounding)
 
-- Capital final: **$35,828.80**
-- Retorno total: **+258.29%**
+- Capital final: **$35,828.45**
+- Retorno total: **+258.28%**
 - Max drawdown: **-13.84%**
 - Trades en drawdown: **433/570 (76.0%)**
 
@@ -56,14 +56,14 @@
 
 ## Monte Carlo (2000 simulaciones)
 
-- Capital final mediano: **$35,828.80**
-- Capital final p05 (peor 5%): **$35,828.80**
-- Capital final p95 (mejor 5%): **$35,828.80**
-- Drawdown mediano: **-10.60%**
-- Drawdown p95 (peor caso): **-16.11%**
+- Capital final mediano: **$35,966.60**
+- Capital final p05 (peor 5%): **$22,317.97**
+- Capital final p95 (mejor 5%): **$57,551.38**
+- Drawdown mediano: **-10.56%**
+- Drawdown p95 (peor caso): **-16.91%**
 - Mediana de prob. de ganar dinero: **100.0%**
 - Max losses consecutivas (p95): **11**
-- Max losses consecutivas peor caso: **16**
+- Max losses consecutivas peor caso: **20**
 
 ## Rolling Metrics (ventana=30 trades)
 

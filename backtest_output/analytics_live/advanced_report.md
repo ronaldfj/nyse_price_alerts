@@ -57,13 +57,13 @@
 ## Monte Carlo (1000 simulaciones)
 
 - Capital final mediano: **$10,236.16**
-- Capital final p05 (peor 5%): **$10,236.16**
-- Capital final p95 (mejor 5%): **$10,236.16**
+- Capital final p05 (peor 5%): **$9,702.99**
+- Capital final p95 (mejor 5%): **$10,798.64**
 - Drawdown mediano: **-1.99%**
-- Drawdown p95 (peor caso): **-1.99%**
-- Mediana de prob. de ganar dinero: **100.0%**
-- Max losses consecutivas (p95): **2**
-- Max losses consecutivas peor caso: **2**
+- Drawdown p95 (peor caso): **-2.97%**
+- Mediana de prob. de ganar dinero: **70.9%**
+- Max losses consecutivas (p95): **3**
+- Max losses consecutivas peor caso: **3**
 
 ## Time Exposure
 
