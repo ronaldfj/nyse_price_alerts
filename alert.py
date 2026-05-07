@@ -103,7 +103,7 @@ STATE_FILE = os.getenv("STOCK_STATE_FILE", "stock_state.json")
 ALERTS_HISTORY_FILE = os.getenv("ALERTS_HISTORY_FILE", "alerts_history.csv")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
-MIN_SCORE = float(os.getenv("MIN_SCORE", "5.5))
+MIN_SCORE = float(os.getenv("MIN_SCORE", "5.5"))
 MIN_RR = float(os.getenv("MIN_RR", "1.6"))
 COOLDOWN = int(os.getenv("COOLDOWN_HOURS", "48")) * 3600
 EARNINGS_BUFFER_DAYS = int(os.getenv("EARNINGS_BUFFER_DAYS", "5"))
