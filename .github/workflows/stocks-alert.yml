@@ -78,6 +78,10 @@ jobs:
           POST_STOP_SCORE_PENALTY: "1.0"
           SLOPE_CONSISTENCY_RATIO: "0.3"
           SLOPE_WEAK_PENALTY: "0.4"
+          # -- Iteracion 2.2 -- Group-Aware RS + Dynamic Vol Gate --
+          FINAL_RS_MIN_BY_GROUP: "Finance:-4.0,Health:-4.0,Consumer:-2.0"
+          VIX_LOW_LEVEL: "18.0"
+          BREAKOUT_EXTENDED_VOL_RATIO_LOW_VIX: "1.5"
           # -- Iteracion 2.1 -- Confluence + Adaptive Scoring --
           CONFLUENCE_THRESHOLD: "3"
           CONFLUENCE_BONUS: "0.5"
