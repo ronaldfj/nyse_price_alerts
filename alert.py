@@ -103,7 +103,7 @@ STATE_FILE = os.getenv("STOCK_STATE_FILE", "stock_state.json")
 ALERTS_HISTORY_FILE = os.getenv("ALERTS_HISTORY_FILE", "alerts_history.csv")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
-MIN_SCORE = float(os.getenv("MIN_SCORE", "5.8"))
+MIN_SCORE = float(os.getenv("MIN_SCORE", "5.5))
 MIN_RR = float(os.getenv("MIN_RR", "1.6"))
 COOLDOWN = int(os.getenv("COOLDOWN_HOURS", "48")) * 3600
 EARNINGS_BUFFER_DAYS = int(os.getenv("EARNINGS_BUFFER_DAYS", "5"))
@@ -117,7 +117,7 @@ RS_LOOKBACK = int(os.getenv("RS_LOOKBACK", "20"))
 SWING_LOOKBACK = int(os.getenv("SWING_LOOKBACK", "12"))
 PULLBACK_MAX_ATR = float(os.getenv("PULLBACK_MAX_ATR", "1.20"))
 BREAKOUT_MAX_ATR = float(os.getenv("BREAKOUT_MAX_ATR", "3.20"))
-WEAK_ADX_BLOCK = float(os.getenv("WEAK_ADX_BLOCK", "15.0"))
+WEAK_ADX_BLOCK = float(os.getenv("WEAK_ADX_BLOCK", "13.0"))
 BREAKOUT_RS_MIN = float(os.getenv("BREAKOUT_RS_MIN", "-0.5"))
 BREAKOUT_NEAR_PCT = float(os.getenv("BREAKOUT_NEAR_PCT", "0.995"))
 FINAL_RS_MIN = float(os.getenv("FINAL_RS_MIN", "0.0"))
