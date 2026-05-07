@@ -99,6 +99,13 @@ jobs:
           GAP_FILTER_ENABLED: "true"
           CORRELATION_GUARD_ENABLED: "true"
           BATCH_DOWNLOAD_ENABLED: "true"
+          # -- Iteracion 2.6 -- Quality Hardening (post-XLP) --
+          CONFLUENCE_HARD_FLOOR: "2"
+          CONFLUENCE_SOFT_FLOOR: "3"
+          CONFLUENCE_LOW_PENALTY: "0.5"
+          SUPERTREND_BLOCK_ADX_MIN: "15.0"
+          SUPERTREND_BLOCK_RS_NEG: "true"
+          ETF_RS_FLOOR: "-3.0"
         run: python alert.py
 
       - name: Analizar histórico
