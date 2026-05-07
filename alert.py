@@ -24,6 +24,13 @@ Iteración 2.1:
   - Energy: XOM, CVX (nuevo grupo)
   - ETFs sectoriales: XLK, XLF, XLV, XLI, XLE, XLP
 
+  === Iteracion 2.6 — Quality Hardening (post-XLP false positive) ===
+  Fixes basados en alerta XLP que paso siendo de baja calidad:
+  - Fix #1: confluence_count <2 = hard block, <3 = penalty -0.5 (antes sin penalty)
+  - Fix #2: Supertrend bajista ahora bloquea con ADX>=15 (antes >=20)
+  - Fix #3: Supertrend bajista + RS<0 = hard block automatico (cualquier ADX)
+  - Fix #4: Sector ETFs requieren RS minimo absoluto (ETF_RS_FLOOR=-3%)
+
   === Iteracion 2.5 — Bug Fixes + Quality Filters + Risk Sizing ===
   BUGS:
   - Fix #1: post-stop cooldown solo cuenta trades cerrados (no abiertos)
@@ -251,6 +258,19 @@ CORRELATION_GUARD_ENABLED = os.getenv("CORRELATION_GUARD_ENABLED", "true").lower
 # #4: Batch download
 BATCH_DOWNLOAD_ENABLED = os.getenv("BATCH_DOWNLOAD_ENABLED", "true").lower() == "true"
 
+# ── Iteracion 2.6 — Quality Hardening ────────────────────────────────────────
+# #1: Confluence floor — bloquear setups con muy poca confluencia
+CONFLUENCE_HARD_FLOOR    = int(os.getenv("CONFLUENCE_HARD_FLOOR", "2"))   # < hard block
+CONFLUENCE_SOFT_FLOOR    = int(os.getenv("CONFLUENCE_SOFT_FLOOR", "3"))   # < penalty
+CONFLUENCE_LOW_PENALTY   = float(os.getenv("CONFLUENCE_LOW_PENALTY", "0.5"))
+
+# #2/3: Supertrend bajista mas restrictivo
+SUPERTREND_BLOCK_ADX_MIN = float(os.getenv("SUPERTREND_BLOCK_ADX_MIN", "15.0"))   # antes 20
+SUPERTREND_BLOCK_RS_NEG  = os.getenv("SUPERTREND_BLOCK_RS_NEG", "true").lower() == "true"
+
+# #4: Sector ETFs RS floor absoluto — XLP con RS=-6.79% nunca deberia pasar
+ETF_RS_FLOOR             = float(os.getenv("ETF_RS_FLOOR", "-3.0"))
+
 # v2.5 Fix #3: tracking de simbolos donde fallo earnings — para reportarlo al final
 EARNINGS_FAILURES: set[str] = set()
 
@@ -344,8 +364,14 @@ class StockSignal:
         benchmark_ok = ALERT_ETFS or self.symbol not in INDEX_ETFS
         # v2.2: RS minima por grupo — Finance/Health tienen threshold mas permisivo
         rs_min = FINAL_RS_MIN_BY_GROUP.get(self.group, FINAL_RS_MIN)
-        # v2.4: sector ETFs y ETFs de indice omiten filtro RS (son el benchmark)
-        rs_ok = self.symbol in SECTOR_ETFS or self.symbol in INDEX_ETFS or self.rs20 >= rs_min
+        # v2.4: ETFs de indice omiten filtro RS (son el benchmark)
+        # v2.6 Fix #4: sector ETFs requieren RS minimo absoluto (ETF_RS_FLOOR)
+        if self.symbol in INDEX_ETFS:
+            rs_ok = True
+        elif self.symbol in SECTOR_ETFS:
+            rs_ok = self.rs20 >= ETF_RS_FLOOR
+        else:
+            rs_ok = self.rs20 >= rs_min
         return (
             self.score >= MIN_SCORE
             and self.rr >= MIN_RR
@@ -1340,12 +1366,18 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     if sym_context.get("hard_block_long"):
         blocked.append(f"Bloqueo manual: {sym_context.get('note', 'sin nota')}")
 
-    # Hard block: Supertrend bajista con tendencia confirmada (ADX > 20)
-    # Solo bloquea si el flag SUPERTREND_REGIME_BLOCK está activo y ADX confirma dirección
-    if SUPERTREND_REGIME_BLOCK and not supertrend_bull and adx >= 20:
-        blocked.append(
-            f"Supertrend bajista (ST={st_value_last:.2f}, ADX={adx:.1f}) — sin sesgo alcista"
-        )
+    # v2.6 Fix #2/#3: Supertrend bajista — hard block mas restrictivo
+    # Antes: solo bloqueaba con ADX>=20 (XLP paso con ADX=18.7)
+    # Ahora: bloquea con ADX>=15 O cuando RS es negativa (sin importar ADX)
+    if SUPERTREND_REGIME_BLOCK and not supertrend_bull:
+        if adx >= SUPERTREND_BLOCK_ADX_MIN:
+            blocked.append(
+                f"Supertrend bajista (ST={st_value_last:.2f}, ADX={adx:.1f} >= {SUPERTREND_BLOCK_ADX_MIN}) — sin sesgo alcista"
+            )
+        elif SUPERTREND_BLOCK_RS_NEG and rs20 < 0:
+            blocked.append(
+                f"Supertrend bajista (ST={st_value_last:.2f}) + RS negativa ({rs20:+.2f}%) — sector en lag"
+            )
 
     # v2.0: deflacion cuadratica por extension sobre EMA200
     if extension_pct > 30:
@@ -1615,7 +1647,19 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         vol_ratio >= TRIGGER_VOL_RATIO,
     ]
     confluence_count = sum(bool(s) for s in confluence_signals)
-    if confluence_count == 4:
+    # v2.6 Fix #1: confluence floor — XLP paso con confluence=1, eso no debe ocurrir
+    # Backtest: confluence 0-1 da WR 24-25% vs confluence 4 que da WR 68%
+    if confluence_count < CONFLUENCE_HARD_FLOOR:
+        blocked.append(
+            f"Confluencia insuficiente ({confluence_count}/5 < {CONFLUENCE_HARD_FLOOR} requerido) — "
+            f"sin catalizadores de entrada"
+        )
+    elif confluence_count < CONFLUENCE_SOFT_FLOOR:
+        score_adjustment -= CONFLUENCE_LOW_PENALTY
+        warnings.append(
+            f"Confluencia baja ({confluence_count}/5 senales) — penalty {CONFLUENCE_LOW_PENALTY}"
+        )
+    elif confluence_count == 4:
         score_adjustment += CONFLUENCE_BONUS
         reasons.append(f"Confluencia optima (4/5 senales) +{CONFLUENCE_BONUS}")
     elif confluence_count == 5:
