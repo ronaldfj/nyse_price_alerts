@@ -1,0 +1,4 @@
+trade_n,closed_dt,symbol,status,realized_r,pnl_dollars,capital,peak,drawdown_pct,in_drawdown
+1,2026-04-23 00:57:21.753576+00:00,JPM,hit_stop,-1.0,-100.0,9900.0,10000.0,-1.0,True
+2,2026-05-01 15:12:34.038899+00:00,NVDA,hit_stop,-1.0,-99.0,9801.0,10000.0,-1.99,True
+3,2026-05-07 13:33:45.840603+00:00,GOOGL,hit_target,4.44,435.16,10236.16,10236.16,0.0,False
