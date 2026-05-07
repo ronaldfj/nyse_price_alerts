@@ -119,6 +119,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     if: github.event_name == 'workflow_dispatch'
+    needs: run-alert
 
     steps:
       - name: Descargar repositorio
@@ -182,6 +183,13 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           mkdir -p backtest_output
           git add backtest_output/
-          git diff --cached --quiet || git commit -m "chore: backtest results $(date -u +%Y-%m-%d)"
-          git pull --rebase origin main
-          git push
+          git diff --cached --quiet && echo "Sin cambios, nada que commitear" && exit 0
+          git commit -m "chore: backtest results $(date -u +%Y-%m-%d)"
+          # Reintento robusto: fetch + rebase + push (hasta 3 intentos)
+          for i in 1 2 3; do
+            git fetch origin main
+            git rebase origin/main
+            git push && break
+            echo "Intento $i fallido, reintentando..."
+            sleep 5
+          done
