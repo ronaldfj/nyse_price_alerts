@@ -66,7 +66,7 @@ jobs:
           FINAL_RS_MIN: "0.0"
           RS_LOOKBACK: "20"
           SWING_LOOKBACK: "12"
-          MIN_SCORE: "5.8"
+          MIN_SCORE: "5.5"
           MIN_RR: "0.8"
           COOLDOWN_HOURS: "24"
           REQUIRE_PLAYBOOK: "true"
