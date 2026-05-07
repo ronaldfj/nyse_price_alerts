@@ -79,7 +79,7 @@ jobs:
           SLOPE_CONSISTENCY_RATIO: "0.3"
           SLOPE_WEAK_PENALTY: "0.4"
           # -- Iteracion 2.2 -- Group-Aware RS + Dynamic Vol Gate --
-          FINAL_RS_MIN_BY_GROUP: "Finance:-4.0,Health:-4.0,Consumer:-2.0"
+          FINAL_RS_MIN_BY_GROUP: "Finance:-4.0,Health:-4.0,Consumer:-2.0,Industrial:-2.0,Energy:-3.0"
           VIX_LOW_LEVEL: "18.0"
           BREAKOUT_EXTENDED_VOL_RATIO_LOW_VIX: "1.5"
           # -- Iteracion 2.1 -- Confluence + Adaptive Scoring --
@@ -89,6 +89,16 @@ jobs:
           ADAPTIVE_RR_MULTIPLIER: "1.25"
           VOLUME_PROFILE_LOOKBACK: "3"
           VOLUME_PROFILE_PENALTY: "0.5"
+          # -- Iteracion 2.5 -- Quality Filters + Risk Sizing --
+          BREADTH_ENABLED: "true"
+          BREADTH_MIN_PCT: "50.0"
+          BREADTH_BLOCK_BELOW: "40.0"
+          ACCOUNT_SIZE_USD: "10000"
+          RISK_PER_TRADE_PCT: "1.0"
+          GAP_BLOCK_PCT: "2.0"
+          GAP_FILTER_ENABLED: "true"
+          CORRELATION_GUARD_ENABLED: "true"
+          BATCH_DOWNLOAD_ENABLED: "true"
         run: python alert.py
 
       - name: Analizar histórico
@@ -164,7 +174,7 @@ jobs:
           ADAPTIVE_RR_MULTIPLIER: "1.25"
           VOLUME_PROFILE_LOOKBACK: "3"
           VOLUME_PROFILE_PENALTY: "0.5"
-          FINAL_RS_MIN_BY_GROUP: "Finance:-4.0,Health:-4.0,Consumer:-2.0"
+          FINAL_RS_MIN_BY_GROUP: "Finance:-4.0,Health:-4.0,Consumer:-2.0,Industrial:-2.0,Energy:-3.0"
         run: |
           python backtest.py --years 3 --export-features
 
