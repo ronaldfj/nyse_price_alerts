@@ -24,6 +24,18 @@ Iteración 2.1:
   - Energy: XOM, CVX (nuevo grupo)
   - ETFs sectoriales: XLK, XLF, XLV, XLI, XLE, XLP
 
+  === Iteracion 2.7 — Pullback Hardening (Backtest-Driven) ===
+  Decision basada en compare_playbooks Fase B:
+  - breakout: 0.319R (edge mejorando +0.105)
+  - pullback: 0.121R (edge degradandose -0.138)
+  - hybrid:   -0.261R (eliminado en v2.3)
+  Mantenemos ambos para diversificacion temporal pero endurecemos pullback:
+  - PULLBACK_MIN_CONFLUENCE: 3 (vs 2 global) — solo pullbacks con catalizadores
+  - PULLBACK_MIN_RS: 1.0% (vs 0% global) — solo activos con liderazgo
+  - PULLBACK_MIN_ADX: 20 (vs 15 global) — solo tendencias fuertes
+  - PULLBACK_MIN_SCORE: MIN_SCORE + 0.5 — barra mas alta para pullback
+  - PULLBACK_MAX_BARS: 12 (vs 20 global) — corta trades estancados rapido
+
   === Iteracion 2.6 — Quality Hardening (post-XLP false positive) ===
   Fixes basados en alerta XLP que paso siendo de baja calidad:
   - Fix #1: confluence_count <2 = hard block, <3 = penalty -0.5 (antes sin penalty)
@@ -270,6 +282,15 @@ SUPERTREND_BLOCK_RS_NEG  = os.getenv("SUPERTREND_BLOCK_RS_NEG", "true").lower() 
 
 # #4: Sector ETFs RS floor absoluto — XLP con RS=-6.79% nunca deberia pasar
 ETF_RS_FLOOR             = float(os.getenv("ETF_RS_FLOOR", "-3.0"))
+
+# ── Iteracion 2.7 — Pullback Hardening ───────────────────────────────────────
+# Backtest Fase B mostro pullback degradandose (-0.138R primera vs segunda mitad)
+# Solucion: filtros mas estrictos SOLO para pullback, breakout queda igual
+PULLBACK_MIN_CONFLUENCE = int(os.getenv("PULLBACK_MIN_CONFLUENCE", "3"))
+PULLBACK_MIN_RS         = float(os.getenv("PULLBACK_MIN_RS", "1.0"))
+PULLBACK_MIN_ADX        = float(os.getenv("PULLBACK_MIN_ADX", "20.0"))
+PULLBACK_MIN_SCORE_BONUS = float(os.getenv("PULLBACK_MIN_SCORE_BONUS", "0.5"))
+PULLBACK_MAX_BARS       = int(os.getenv("PULLBACK_MAX_BARS", "12"))
 
 # v2.5 Fix #3: tracking de simbolos donde fallo earnings — para reportarlo al final
 EARNINGS_FAILURES: set[str] = set()
@@ -827,11 +848,15 @@ def update_alert_history_tracker() -> dict[str, int]:
                 exit_reason = "target_hit"
                 break
 
-        if exit_status == "open" and bars_open >= TRACKER_MAX_BARS_OPEN:
+        # v2.7: time-stop diferenciado por playbook
+        playbook = (row.get("playbook") or "").strip().lower()
+        max_bars_for_trade = PULLBACK_MAX_BARS if playbook == "pullback" else TRACKER_MAX_BARS_OPEN
+
+        if exit_status == "open" and bars_open >= max_bars_for_trade:
             exit_status = "expired"
             exit_price = current_price
             exit_date = trade_df.index[-1].date().isoformat()
-            exit_reason = f"time_stop_{TRACKER_MAX_BARS_OPEN}_bars"
+            exit_reason = f"time_stop_{max_bars_for_trade}_bars"
 
         row["status"] = exit_status
         row["last_checked_utc"] = now_utc
@@ -1675,6 +1700,25 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         reasons.append(f"Ajuste macro/manual: {score_adjustment:+.2f}")
     if context_note:
         reasons.append(f"Contexto: {context_note}")
+
+    # v2.7: filtros estrictos solo para pullback (backtest mostro edge degradandose)
+    if signal_type == "pullback":
+        if confluence_count < PULLBACK_MIN_CONFLUENCE:
+            blocked.append(
+                f"Pullback hardening: confluence {confluence_count}/5 < {PULLBACK_MIN_CONFLUENCE} requerido"
+            )
+        if rs20 < PULLBACK_MIN_RS:
+            blocked.append(
+                f"Pullback hardening: RS={rs20:+.2f}% < {PULLBACK_MIN_RS}% requerido (sin liderazgo)"
+            )
+        if adx < PULLBACK_MIN_ADX:
+            blocked.append(
+                f"Pullback hardening: ADX={adx:.1f} < {PULLBACK_MIN_ADX} requerido (tendencia debil)"
+            )
+        if total_score < (MIN_SCORE + PULLBACK_MIN_SCORE_BONUS):
+            blocked.append(
+                f"Pullback hardening: score {total_score:.1f} < {MIN_SCORE + PULLBACK_MIN_SCORE_BONUS:.1f} requerido"
+            )
 
     range_20 = max(prior_high_20 - prior_low_20, 1.2 * atr)
     measured_move = max(0.75 * range_20, 1.6 * atr)
