@@ -130,6 +130,13 @@ for _e in FINAL_RS_MIN_BY_GROUP_RAW.split(","):
             pass
 
 # Backtest-especifico
+# v2.7: Pullback Hardening (Backtest Fase B mostro pullback degradandose)
+PULLBACK_MIN_CONFLUENCE = int(os.getenv("PULLBACK_MIN_CONFLUENCE", "3"))
+PULLBACK_MIN_RS         = float(os.getenv("PULLBACK_MIN_RS", "1.0"))
+PULLBACK_MIN_ADX        = float(os.getenv("PULLBACK_MIN_ADX", "20.0"))
+PULLBACK_MIN_SCORE_BONUS = float(os.getenv("PULLBACK_MIN_SCORE_BONUS", "0.5"))
+PULLBACK_MAX_BARS       = int(os.getenv("PULLBACK_MAX_BARS", "12"))
+
 COOLDOWN_BARS       = int(os.getenv("BT_COOLDOWN_BARS", "5"))   # barras entre señales del mismo simbolo
 MAX_BARS_HOLD       = int(os.getenv("BT_MAX_BARS_HOLD", "15"))  # time-stop
 REQUIRE_PLAYBOOK    = True
@@ -633,6 +640,17 @@ def evaluate_bar(
     if rr < effective_min_rr and extension_pct > ADAPTIVE_RR_EXT_THRESHOLD:
         blocked.append(f"Adaptive RR {rr:.2f} < {effective_min_rr:.2f}")
 
+    # v2.7: filtros estrictos solo para pullback (backtest mostro edge degradandose)
+    if signal_type == "pullback":
+        if confluence_count < PULLBACK_MIN_CONFLUENCE:
+            return None
+        if rs20 < PULLBACK_MIN_RS:
+            return None
+        if adx < PULLBACK_MIN_ADX:
+            return None
+        if total_score < (MIN_SCORE + PULLBACK_MIN_SCORE_BONUS):
+            return None
+
     # ── Filtros finales ────────────────────────────────────────────────────
     if blocked:
         return None
@@ -691,21 +709,25 @@ def evaluate_bar(
 # Simulacion de outcome barra a barra tras la señal
 # ---------------------------------------------------------------------------
 
-def simulate_trade(df: pd.DataFrame, signal_bar: int, entry: float, target: float, stop: float) -> dict:
+def simulate_trade(df: pd.DataFrame, signal_bar: int, entry: float, target: float, stop: float, playbook: str = "") -> dict:
     """
     Itera sobre barras posteriores a signal_bar para detectar hit_target / hit_stop / expired.
     Usa High/Low de cada barra — conservador: si ambos se tocan en la misma barra, stop gana.
+    v2.7: time-stop diferenciado — pullback usa PULLBACK_MAX_BARS (12), breakout MAX_BARS_HOLD (15).
     """
     n = len(df)
+    # v2.7: time-stop especifico por playbook
+    max_bars = PULLBACK_MAX_BARS if playbook == "pullback" else MAX_BARS_HOLD
+
     bars_open = 0
     mfe = 0.0   # max favorable excursion %
     mae = 0.0   # max adverse excursion %
     exit_status = "expired"
-    exit_price  = float(df["Close"].iloc[min(signal_bar + MAX_BARS_HOLD - 1, n - 1)])
+    exit_price  = float(df["Close"].iloc[min(signal_bar + max_bars - 1, n - 1)])
     exit_date   = ""
-    exit_reason = f"time_stop_{MAX_BARS_HOLD}_bars"
+    exit_reason = f"time_stop_{max_bars}_bars"
 
-    for j in range(signal_bar, min(signal_bar + MAX_BARS_HOLD, n)):
+    for j in range(signal_bar, min(signal_bar + max_bars, n)):
         bar_high = float(df["High"].iloc[j])
         bar_low  = float(df["Low"].iloc[j])
         bar_close= float(df["Close"].iloc[j])
@@ -803,7 +825,7 @@ def backtest_symbol(
         # Simular outcome sobre barras futuras (i en adelante, la señal se actua en la apertura de i+1)
         # Usamos barra i+1 como entry bar para ser conservadores
         entry_bar = i  # apertura del dia siguiente a la señal
-        outcome = simulate_trade(df, entry_bar, sig["entry"], sig["target"], sig["stop"])
+        outcome = simulate_trade(df, entry_bar, sig["entry"], sig["target"], sig["stop"], sig.get("playbook", ""))
 
         # Ensamblar fila compatible con alerts_history.csv
         now_str = datetime.now(timezone.utc).isoformat()
