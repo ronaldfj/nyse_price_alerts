@@ -131,11 +131,14 @@ for _e in FINAL_RS_MIN_BY_GROUP_RAW.split(","):
 
 # Backtest-especifico
 # v2.7: Pullback Hardening (Backtest Fase B mostro pullback degradandose)
-PULLBACK_MIN_CONFLUENCE = int(os.getenv("PULLBACK_MIN_CONFLUENCE", "3"))
-PULLBACK_MIN_RS         = float(os.getenv("PULLBACK_MIN_RS", "1.0"))
-PULLBACK_MIN_ADX        = float(os.getenv("PULLBACK_MIN_ADX", "20.0"))
-PULLBACK_MIN_SCORE_BONUS = float(os.getenv("PULLBACK_MIN_SCORE_BONUS", "0.5"))
+# v2.8: thresholds relajados (v2.7 dejaba pullback en n=0)
+PULLBACK_MIN_CONFLUENCE = int(os.getenv("PULLBACK_MIN_CONFLUENCE", "2"))
+PULLBACK_MIN_RS         = float(os.getenv("PULLBACK_MIN_RS", "0.0"))
+PULLBACK_MIN_ADX        = float(os.getenv("PULLBACK_MIN_ADX", "18.0"))
+PULLBACK_MIN_SCORE_BONUS = float(os.getenv("PULLBACK_MIN_SCORE_BONUS", "0.3"))
 PULLBACK_MAX_BARS       = int(os.getenv("PULLBACK_MAX_BARS", "12"))
+# v2.8: sizing reducido fijo
+PULLBACK_SIZING_FACTOR  = 0.5
 
 COOLDOWN_BARS       = int(os.getenv("BT_COOLDOWN_BARS", "5"))   # barras entre señales del mismo simbolo
 MAX_BARS_HOLD       = int(os.getenv("BT_MAX_BARS_HOLD", "15"))  # time-stop
@@ -549,26 +552,15 @@ def evaluate_bar(
         and adx >= 18 and rsi <= BREAKOUT_RSI_MAX
         and pullback_atr <= BREAKOUT_MAX_ATR and entry > ema50
     )
-    is_hybrid = (
-        not is_breakout and not is_pullback
-        and entry > ema200 and ema50 > ema200 and entry > ema50
-        and broke_prior_high_5 and positive_momentum
-        and trigger_score >= 1.8 and adx >= 18 and rsi <= BREAKOUT_RSI_MAX
-        and pullback_atr <= BREAKOUT_MAX_ATR and rs20 >= max(BREAKOUT_RS_MIN, -0.25)
-    )
-
+    # v2.8: Cascada de clasificacion FIJA — pullback PRIMERO, sin reclasificacion
     if is_pullback:
         signal_type = "pullback"
         setup_score += 1.0
-        reasons.append("Playbook: Pullback Continuation")
-    if is_breakout:
-        signal_type = "breakout" if signal_type == "none" else "hybrid"
+        reasons.append("Playbook: Pullback Continuation (secundario)")
+    elif is_breakout:
+        signal_type = "breakout"
         trigger_score += 1.2
-        reasons.append("Playbook: Breakout Expansion")
-    elif is_hybrid:
-        signal_type = "hybrid"
-        trigger_score += 0.9
-        reasons.append("Playbook: Hybrid")
+        reasons.append("Playbook: Breakout Expansion (principal)")
 
     if signal_type == "none":
         setup_score -= 0.7
@@ -658,7 +650,7 @@ def evaluate_bar(
         return None
     if rr < MIN_RR:
         return None
-    if REQUIRE_PLAYBOOK and signal_type not in {"pullback", "breakout", "hybrid"}:
+    if REQUIRE_PLAYBOOK and signal_type not in {"pullback", "breakout"}:
         return None
     rs_min = FINAL_RS_MIN_BY_GROUP.get(group, FINAL_RS_MIN)
     if rs20 < rs_min:
