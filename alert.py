@@ -24,6 +24,15 @@ Iteración 2.1:
   - Energy: XOM, CVX (nuevo grupo)
   - ETFs sectoriales: XLK, XLF, XLV, XLI, XLE, XLP
 
+  === Iteracion 2.8 — Clasificacion Fija + Sizing Diferenciado ===
+  Decision arquitectonica post-v2.7: pullback como playbook secundario, no contaminante.
+  - Cascada de clasificacion fija: pullback PRIMERO (estricto) -> breakout -> descartado
+  - Pullback que califica = pullback (no se reclasifica como breakout)
+  - Breakout solo entra si cumple sus reglas originales (sin contaminacion)
+  - Hybrid eliminado completamente (no hay caso else que lo genere)
+  - PULLBACK_SIZING_FACTOR = 0.5 fijo (mitad de riesgo de breakout)
+  - Filtros pullback relajados de v2.7: confluence>=2, RS>=0%, ADX>=18, score+0.3
+
   === Iteracion 2.7 — Pullback Hardening (Backtest-Driven) ===
   Decision basada en compare_playbooks Fase B:
   - breakout: 0.319R (edge mejorando +0.105)
@@ -286,11 +295,14 @@ ETF_RS_FLOOR             = float(os.getenv("ETF_RS_FLOOR", "-3.0"))
 # ── Iteracion 2.7 — Pullback Hardening ───────────────────────────────────────
 # Backtest Fase B mostro pullback degradandose (-0.138R primera vs segunda mitad)
 # Solucion: filtros mas estrictos SOLO para pullback, breakout queda igual
-PULLBACK_MIN_CONFLUENCE = int(os.getenv("PULLBACK_MIN_CONFLUENCE", "3"))
-PULLBACK_MIN_RS         = float(os.getenv("PULLBACK_MIN_RS", "1.0"))
-PULLBACK_MIN_ADX        = float(os.getenv("PULLBACK_MIN_ADX", "20.0"))
-PULLBACK_MIN_SCORE_BONUS = float(os.getenv("PULLBACK_MIN_SCORE_BONUS", "0.5"))
+# v2.8: thresholds relajados (v2.7 dejaba pullback en n=0)
+PULLBACK_MIN_CONFLUENCE = int(os.getenv("PULLBACK_MIN_CONFLUENCE", "2"))
+PULLBACK_MIN_RS         = float(os.getenv("PULLBACK_MIN_RS", "0.0"))
+PULLBACK_MIN_ADX        = float(os.getenv("PULLBACK_MIN_ADX", "18.0"))
+PULLBACK_MIN_SCORE_BONUS = float(os.getenv("PULLBACK_MIN_SCORE_BONUS", "0.3"))
 PULLBACK_MAX_BARS       = int(os.getenv("PULLBACK_MAX_BARS", "12"))
+# v2.8: sizing reducido para pullback — fijo en 50% del riesgo de breakout
+PULLBACK_SIZING_FACTOR  = 0.5
 
 # v2.5 Fix #3: tracking de simbolos donde fallo earnings — para reportarlo al final
 EARNINGS_FAILURES: set[str] = set()
@@ -1282,12 +1294,15 @@ def compute_market_breadth() -> Optional[float]:
     return round(pct, 1)
 
 
-# ── v2.5 #7: Position sizing ─────────────────────────────────────────────────
-def compute_position_size(entry: float, stop: float) -> tuple[int, float, float]:
+# ── v2.5 #7 + v2.8: Position sizing diferenciado por playbook ────────────────
+def compute_position_size(entry: float, stop: float, playbook: str = "breakout") -> tuple[int, float, float]:
     """Calcula # acciones, $ posicion, $ riesgo basado en RISK_PER_TRADE_PCT.
+    v2.8: pullback usa PULLBACK_SIZING_FACTOR (0.5) — mitad del riesgo de breakout.
     Returns (shares, position_usd, risk_usd)."""
     risk_per_share = max(entry - stop, 0.01)
-    risk_budget    = ACCOUNT_SIZE_USD * (RISK_PER_TRADE_PCT / 100.0)
+    # v2.8: aplicar sizing factor para playbook secundario
+    sizing_factor = PULLBACK_SIZING_FACTOR if playbook == "pullback" else 1.0
+    risk_budget    = ACCOUNT_SIZE_USD * (RISK_PER_TRADE_PCT / 100.0) * sizing_factor
     shares = int(risk_budget / risk_per_share)
     position_usd = shares * entry
     risk_usd     = shares * risk_per_share
@@ -1620,38 +1635,18 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         and entry > ema50
     )
 
-    is_hybrid = (
-        not is_breakout
-        and not is_pullback
-        and entry > ema200
-        and ema50 > ema200
-        and entry > ema50
-        and broke_prior_high_5
-        and positive_momentum
-        and trigger_score >= 1.8
-        and adx >= 18
-        and rsi <= BREAKOUT_RSI_MAX
-        and pullback_atr <= BREAKOUT_MAX_ATR
-        and rs20 >= max(BREAKOUT_RS_MIN, -0.25)
-    )
-
+    # v2.8: Cascada de clasificacion FIJA
+    # 1. Pullback PRIMERO (estricto). Si califica -> pullback (sin contaminar)
+    # 2. Breakout SEGUNDO. Solo entra si cumple SUS reglas, no como fallback de pullback
+    # 3. Si ninguno califica -> descartado (hybrid eliminado completamente)
     if is_pullback:
         signal_type = "pullback"
         setup_score += 1.0
-        reasons.append("Playbook activo: Pullback Continuation")
-
-    if is_breakout:
-        signal_type = "breakout" if signal_type == "none" else "hybrid"
+        reasons.append("Playbook activo: Pullback Continuation (secundario, sizing reducido)")
+    elif is_breakout:
+        signal_type = "breakout"
         trigger_score += 1.2
-        reasons.append("Playbook activo: Breakout Expansion")
-    elif is_hybrid:
-        signal_type = "hybrid"
-        trigger_score += 0.9
-        # v2.3: hybrid penalizado — backtest avg_R=-0.208, stop rate 73.3%
-        # Se detecta para logging pero se bloquea en should_alert
-        score_adjustment -= 1.5
-        warnings.append("Playbook hybrid deshabilitado (backtest: stop rate 73.3%)")
-        reasons.append("Playbook: Early Expansion / Hybrid (penalizado)")
+        reasons.append("Playbook activo: Breakout Expansion (motor principal)")
 
     if signal_type == "none":
         setup_score -= 0.7
@@ -1801,7 +1796,7 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
             )
 
     # v2.5: position sizing + trailing stop sugerido + ranking score
-    shares, pos_usd, risk_usd = compute_position_size(entry, stop)
+    shares, pos_usd, risk_usd = compute_position_size(entry, stop, signal_type)
     trailing_initial = compute_trailing_stop_initial(entry, atr, ema20)
     # ranking: score ponderado por confluence + RS positiva (boost)
     rank = total_score * (1 + confluence_count * 0.15) * (1 + max(rs20, 0) / 20)
@@ -1847,7 +1842,13 @@ def format_alert(sig: StockSignal, vix: Optional[float]) -> str:
     vix_line = f"📉 *VIX:* {vix:.1f}\n" if vix is not None else ""
     earnings_line = f"📅 *Próximos earnings:* {sig.earnings_date}\n" if sig.earnings_date else ""
     rs_line = f"⚔️ *RS vs SPY (20d):* {sig.rs20:+.2f}%\n" if sig.symbol != "SPY" else ""
-    signal_type_line = f"🧠 *Playbook:* {sig.signal_type}\n" if sig.signal_type != "none" else ""
+    # v2.8: distinguir motor principal (breakout) vs secundario (pullback)
+    if sig.signal_type == "pullback":
+        signal_type_line = f"🟡 *Playbook:* {sig.signal_type} (SECUNDARIO — sizing 50%)\n"
+    elif sig.signal_type == "breakout":
+        signal_type_line = f"🚀 *Playbook:* {sig.signal_type} (PRINCIPAL)\n"
+    else:
+        signal_type_line = ""
     trigger_line = f"🕯️ *Trigger candle:* {sig.trigger_candle_utc}\n"
     st_emoji = "🟢" if sig.supertrend_bull else "🔴"
     st_dir = "ALCISTA" if sig.supertrend_bull else "BAJISTA"
