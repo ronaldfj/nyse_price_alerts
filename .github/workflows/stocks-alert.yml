@@ -106,6 +106,12 @@ jobs:
           SUPERTREND_BLOCK_ADX_MIN: "15.0"
           SUPERTREND_BLOCK_RS_NEG: "true"
           ETF_RS_FLOOR: "-3.0"
+          # -- Iteracion 2.7 -- Pullback Hardening (Backtest Fase B) --
+          PULLBACK_MIN_CONFLUENCE: "3"
+          PULLBACK_MIN_RS: "1.0"
+          PULLBACK_MIN_ADX: "20.0"
+          PULLBACK_MIN_SCORE_BONUS: "0.5"
+          PULLBACK_MAX_BARS: "12"
         run: python alert.py
 
       - name: Analizar histórico
