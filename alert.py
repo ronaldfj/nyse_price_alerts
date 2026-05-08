@@ -24,6 +24,15 @@ Iteración 2.1:
   - Energy: XOM, CVX (nuevo grupo)
   - ETFs sectoriales: XLK, XLF, XLV, XLI, XLE, XLP
 
+  === Iteracion 2.9 — Refactor + Fix Look-Ahead (Auditoria Externa) ===
+  Hallazgos criticos resueltos de revision externa:
+  - Fix #1: simulate_trade entra en signal_bar+1 con Open (no signal_bar) — antes
+            habia look-ahead que sobrestimaba win rate y subestimaba stops
+  - Fix #2: signals.py modulo compartido — add_indicators y compute_relative_strength
+            ahora son UNICA fuente de verdad para alert.py y backtest.py
+  - Fix #8: backtest aplica gap filter (>2%) sobre el real_entry para descartar
+            trades donde el precio teorico no representa la entrada real
+
   === Iteracion 2.8 — Clasificacion Fija + Sizing Diferenciado ===
   Decision arquitectonica post-v2.7: pullback como playbook secundario, no contaminante.
   - Cascada de clasificacion fija: pullback PRIMERO (estricto) -> breakout -> descartado
@@ -103,6 +112,13 @@ from typing import Optional
 import pandas as pd
 import requests
 import yfinance as yf
+
+# v2.9: importar indicadores desde modulo compartido (UNICA fuente de verdad)
+from signals import (
+    add_indicators as _signals_add_indicators,
+    compute_relative_strength as _signals_compute_rs,
+    compute_supertrend_vectorized as _signals_supertrend,
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -1105,62 +1121,13 @@ def compute_supertrend_vectorized(
 
 # ── Indicadores técnicos ──────────────────────────────────────────────────────
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    df["ema20"] = df["Close"].ewm(span=20, adjust=False).mean()
-    df["ema50"] = df["Close"].ewm(span=50, adjust=False).mean()
-    df["ema200"] = df["Close"].ewm(span=200, adjust=False).mean()
-
-    delta = df["Close"].diff()
-    gain = delta.where(delta > 0, 0.0).ewm(com=13, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0.0)).ewm(com=13, adjust=False).mean()
-    df["rsi"] = 100 - (100 / (1 + gain / (loss + 1e-9)))
-
-    prev_close = df["Close"].shift(1)
-    tr = pd.concat(
-        [
-            df["High"] - df["Low"],
-            (df["High"] - prev_close).abs(),
-            (df["Low"] - prev_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    df["atr"] = tr.ewm(com=13, adjust=False).mean()
-
-    up_move = df["High"].diff()
-    dn_move = (-df["Low"].diff())
-    plus_dm = up_move.where((up_move > dn_move) & (up_move > 0), 0.0)
-    minus_dm = dn_move.where((dn_move > up_move) & (dn_move > 0), 0.0)
-    plus_di = 100 * plus_dm.ewm(com=13, adjust=False).mean() / (df["atr"] + 1e-9)
-    minus_di = 100 * minus_dm.ewm(com=13, adjust=False).mean() / (df["atr"] + 1e-9)
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
-    df["adx"] = dx.ewm(com=13, adjust=False).mean()
-    df["plus_di"] = plus_di
-    df["minus_di"] = minus_di
-
-    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["macd"] = ema12 - ema26
-    df["macd_sig"] = df["macd"].ewm(span=9, adjust=False).mean()
-    df["macd_hist"] = df["macd"] - df["macd_sig"]
-
-    df["vol_sma20"] = df["Volume"].rolling(20).mean()
-    df["vol_ratio"] = df["Volume"] / (df["vol_sma20"] + 1e-9)
-
-    df["ema200_slope_5"] = df["ema200"] - df["ema200"].shift(5)
-    df["ema200_slope_3"] = df["ema200"] - df["ema200"].shift(3)
-    df["ema20_slope_3"] = df["ema20"] - df["ema20"].shift(3)
-
-    df["prior_high_5"] = df["High"].shift(1).rolling(5).max()
-    df["prior_high_20"] = df["High"].shift(1).rolling(20).max()
-    df["prior_low_5"] = df["Low"].shift(1).rolling(5).min()
-    df["prior_low_12"] = df["Low"].shift(1).rolling(SWING_LOOKBACK).min()
-    df["prior_low_20"] = df["Low"].shift(1).rolling(20).min()
-
-    # Supertrend (vectorizado)
-    df = compute_supertrend_vectorized(df, period=SUPERTREND_PERIOD, multiplier=SUPERTREND_MULTIPLIER)
-
-    return df
+    """v2.9: delega al modulo signals.py — unica fuente de verdad."""
+    return _signals_add_indicators(
+        df,
+        swing_lookback=SWING_LOOKBACK,
+        supertrend_period=SUPERTREND_PERIOD,
+        supertrend_multiplier=SUPERTREND_MULTIPLIER,
+    )
 
 
 # ── Descarga ──────────────────────────────────────────────────────────────────
@@ -1249,22 +1216,8 @@ def fetch_data(symbol: str) -> Optional[pd.DataFrame]:
 
 # ── Helpers cuantitativos ─────────────────────────────────────────────────────
 def compute_relative_strength(df: pd.DataFrame, spy_df: Optional[pd.DataFrame]) -> float:
-    """v2.5 Fix #2: alineacion temporal asset vs SPY antes de calcular ratio.
-    Si las fechas no coinciden (holidays, IPOs recientes, etc), usar interseccion."""
-    if spy_df is None or len(df) < RS_LOOKBACK + 2 or len(spy_df) < RS_LOOKBACK + 2:
-        return 0.0
-
-    # Alinear por indice — usar solo fechas comunes
-    common_idx = df.index.intersection(spy_df.index)
-    if len(common_idx) < RS_LOOKBACK + 2:
-        return 0.0
-
-    asset_aligned = df["Close"].reindex(common_idx)
-    spy_aligned   = spy_df["Close"].reindex(common_idx)
-
-    asset_ret = (float(asset_aligned.iloc[-2]) / float(asset_aligned.iloc[-2 - RS_LOOKBACK]) - 1.0) * 100
-    spy_ret   = (float(spy_aligned.iloc[-2])   / float(spy_aligned.iloc[-2 - RS_LOOKBACK])   - 1.0) * 100
-    return round(asset_ret - spy_ret, 2)
+    """v2.9: delega al modulo signals.py — unica fuente de verdad."""
+    return _signals_compute_rs(df, spy_df, lookback=RS_LOOKBACK)
 
 
 # ── v2.5 #6: Breadth filter ──────────────────────────────────────────────────
