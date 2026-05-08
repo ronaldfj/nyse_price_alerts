@@ -42,6 +42,13 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+# v2.9: importar indicadores desde modulo compartido (UNICA fuente de verdad)
+from signals import (
+    add_indicators as _signals_add_indicators,
+    compute_relative_strength as _signals_compute_rs,
+    compute_supertrend_vectorized as _signals_supertrend,
+)
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -213,56 +220,13 @@ def compute_supertrend_vectorized(df: pd.DataFrame, period: int = 10, multiplier
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["ema20"]  = df["Close"].ewm(span=20,  adjust=False).mean()
-    df["ema50"]  = df["Close"].ewm(span=50,  adjust=False).mean()
-    df["ema200"] = df["Close"].ewm(span=200, adjust=False).mean()
-
-    delta = df["Close"].diff()
-    gain  = delta.where(delta > 0, 0.0).ewm(com=13, adjust=False).mean()
-    loss  = (-delta.where(delta < 0, 0.0)).ewm(com=13, adjust=False).mean()
-    df["rsi"] = 100 - (100 / (1 + gain / (loss + 1e-9)))
-
-    prev_close = df["Close"].shift(1)
-    tr = pd.concat([
-        df["High"] - df["Low"],
-        (df["High"] - prev_close).abs(),
-        (df["Low"]  - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    df["atr"] = tr.ewm(com=13, adjust=False).mean()
-
-    up_move   = df["High"].diff()
-    dn_move   = -df["Low"].diff()
-    plus_dm   = up_move.where((up_move > dn_move) & (up_move > 0), 0.0)
-    minus_dm  = dn_move.where((dn_move > up_move) & (dn_move > 0), 0.0)
-    plus_di   = 100 * plus_dm.ewm(com=13, adjust=False).mean()  / (df["atr"] + 1e-9)
-    minus_di  = 100 * minus_dm.ewm(com=13, adjust=False).mean() / (df["atr"] + 1e-9)
-    dx        = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
-    df["adx"]      = dx.ewm(com=13, adjust=False).mean()
-    df["plus_di"]  = plus_di
-    df["minus_di"] = minus_di
-
-    ema12 = df["Close"].ewm(span=12, adjust=False).mean()
-    ema26 = df["Close"].ewm(span=26, adjust=False).mean()
-    df["macd"]      = ema12 - ema26
-    df["macd_sig"]  = df["macd"].ewm(span=9, adjust=False).mean()
-    df["macd_hist"] = df["macd"] - df["macd_sig"]
-
-    df["vol_sma20"] = df["Volume"].rolling(20).mean()
-    df["vol_ratio"] = df["Volume"] / (df["vol_sma20"] + 1e-9)
-
-    df["ema200_slope_5"] = df["ema200"] - df["ema200"].shift(5)
-    df["ema200_slope_3"] = df["ema200"] - df["ema200"].shift(3)
-    df["ema20_slope_3"]  = df["ema20"]  - df["ema20"].shift(3)
-
-    df["prior_high_5"]  = df["High"].shift(1).rolling(5).max()
-    df["prior_high_20"] = df["High"].shift(1).rolling(20).max()
-    df["prior_low_5"]   = df["Low"].shift(1).rolling(5).min()
-    df["prior_low_12"]  = df["Low"].shift(1).rolling(SWING_LOOKBACK).min()
-    df["prior_low_20"]  = df["Low"].shift(1).rolling(20).min()
-
-    df = compute_supertrend_vectorized(df, period=SUPERTREND_PERIOD, multiplier=SUPERTREND_MULT)
-    return df
+    """v2.9: delega al modulo signals.py — unica fuente de verdad."""
+    return _signals_add_indicators(
+        df,
+        swing_lookback=SWING_LOOKBACK,
+        supertrend_period=SUPERTREND_PERIOD,
+        supertrend_multiplier=SUPERTREND_MULT,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -711,22 +675,43 @@ def simulate_trade(df: pd.DataFrame, signal_bar: int, entry: float, target: floa
     # v2.7: time-stop especifico por playbook
     max_bars = PULLBACK_MAX_BARS if playbook == "pullback" else MAX_BARS_HOLD
 
+    # v2.9 Fix #1: ENTRY EFECTIVO en signal_bar+1 (Open de la barra siguiente)
+    # Antes: iteraba desde signal_bar — look-ahead, sobrestima win rate
+    # Ahora: la senal se detecta al cierre de signal_bar, la orden se ejecuta
+    # al Open de signal_bar+1 (siguiente dia de trading). Esto es lo que pasa
+    # en la realidad y elimina el sesgo optimista.
+    entry_bar = signal_bar + 1
+    if entry_bar >= n:
+        # No hay barra siguiente — descartar (raro, solo en el ultimo dia del df)
+        return {
+            "status": "no_entry", "bars_open": 0, "days_open": 0,
+            "exit_price": entry, "exit_date": "", "exit_reason": "no_next_bar",
+            "pnl_pct": 0.0, "mfe_pct": 0.0, "mae_pct": 0.0,
+            "real_entry": entry,
+        }
+
+    # Precio de entrada REAL (Open del dia siguiente, no Close del dia de senal)
+    real_entry = float(df["Open"].iloc[entry_bar])
+    # Recalcular riesgo con el precio real (gap puede cambiarlo)
+    real_risk_per_share = real_entry - stop
+
     bars_open = 0
     mfe = 0.0   # max favorable excursion %
     mae = 0.0   # max adverse excursion %
     exit_status = "expired"
-    exit_price  = float(df["Close"].iloc[min(signal_bar + max_bars - 1, n - 1)])
+    exit_price  = float(df["Close"].iloc[min(entry_bar + max_bars - 1, n - 1)])
     exit_date   = ""
     exit_reason = f"time_stop_{max_bars}_bars"
 
-    for j in range(signal_bar, min(signal_bar + max_bars, n)):
+    # Iterar desde entry_bar (no desde signal_bar) — sin look-ahead
+    for j in range(entry_bar, min(entry_bar + max_bars, n)):
         bar_high = float(df["High"].iloc[j])
         bar_low  = float(df["Low"].iloc[j])
-        bar_close= float(df["Close"].iloc[j])
         bars_open += 1
 
-        mfe = max(mfe, (bar_high  - entry) / max(entry, 1e-9) * 100)
-        mae = min(mae, (bar_low   - entry) / max(entry, 1e-9) * 100)
+        # MFE/MAE calculados sobre real_entry (no entry teorico)
+        mfe = max(mfe, (bar_high - real_entry) / max(real_entry, 1e-9) * 100)
+        mae = min(mae, (bar_low  - real_entry) / max(real_entry, 1e-9) * 100)
 
         hit_stop   = bar_low  <= stop
         hit_target = bar_high >= target
@@ -755,7 +740,7 @@ def simulate_trade(df: pd.DataFrame, signal_bar: int, entry: float, target: floa
             break
 
     days_open = bars_open  # aprox 1 barra = 1 dia calendario de trading
-    pnl_pct   = (exit_price - entry) / max(entry, 1e-9) * 100
+    pnl_pct   = (exit_price - real_entry) / max(real_entry, 1e-9) * 100
 
     return {
         "status":      exit_status,
@@ -767,6 +752,7 @@ def simulate_trade(df: pd.DataFrame, signal_bar: int, entry: float, target: floa
         "pnl_pct":     round(pnl_pct, 4),
         "mfe_pct":     round(mfe, 4),
         "mae_pct":     round(mae, 4),
+        "real_entry":  round(real_entry, 4),  # entry efectivo (puede diferir del teorico por gap)
     }
 
 
@@ -814,10 +800,18 @@ def backtest_symbol(
         if sig is None:
             continue
 
-        # Simular outcome sobre barras futuras (i en adelante, la señal se actua en la apertura de i+1)
-        # Usamos barra i+1 como entry bar para ser conservadores
-        entry_bar = i  # apertura del dia siguiente a la señal
-        outcome = simulate_trade(df, entry_bar, sig["entry"], sig["target"], sig["stop"], sig.get("playbook", ""))
+        # v2.9: Pasamos la barra de senal directamente. simulate_trade entra en signal_bar+1 (Open)
+        outcome = simulate_trade(df, i, sig["entry"], sig["target"], sig["stop"], sig.get("playbook", ""))
+
+        # v2.9: descartar trades sin entrada efectiva o con gap excesivo
+        if outcome["status"] == "no_entry":
+            continue
+
+        # v2.9 Fix #8: filtro de gap aplicado al precio real de entrada
+        real_entry = outcome.get("real_entry", sig["entry"])
+        gap_pct = abs((real_entry - sig["entry"]) / max(sig["entry"], 1e-9)) * 100.0
+        if gap_pct > 2.0:  # mismo umbral que GAP_BLOCK_PCT del live
+            continue
 
         # Ensamblar fila compatible con alerts_history.csv
         now_str = datetime.now(timezone.utc).isoformat()
@@ -830,7 +824,7 @@ def backtest_symbol(
             "name":              sig["name"],
             "group":             sig["group"],
             "playbook":          sig["playbook"],
-            "price":             _fmt(sig["entry"]),
+            "price":             _fmt(outcome.get("real_entry", sig["entry"])),  # v2.9: precio real de entrada
             "target":            _fmt(sig["target"]),
             "stop":              _fmt(sig["stop"]),
             "rr":                _fmt(sig["rr"]),
