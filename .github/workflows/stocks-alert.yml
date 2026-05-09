@@ -106,12 +106,6 @@ jobs:
           SUPERTREND_BLOCK_ADX_MIN: "15.0"
           SUPERTREND_BLOCK_RS_NEG: "true"
           ETF_RS_FLOOR: "-3.0"
-          # -- Iteracion 2.8 -- Pullback Secundario (cascada fija + sizing 50%) --
-          PULLBACK_MIN_CONFLUENCE: "2"
-          PULLBACK_MIN_RS: "0.0"
-          PULLBACK_MIN_ADX: "18.0"
-          PULLBACK_MIN_SCORE_BONUS: "0.3"
-          PULLBACK_MAX_BARS: "12"
         run: python alert.py
 
       - name: Analizar histórico
@@ -188,12 +182,6 @@ jobs:
           VOLUME_PROFILE_LOOKBACK: "3"
           VOLUME_PROFILE_PENALTY: "0.5"
           FINAL_RS_MIN_BY_GROUP: "Finance:-4.0,Health:-4.0,Consumer:-2.0,Industrial:-2.0,Energy:-3.0"
-          # -- v2.8 Pullback Secundario (sizing 50% fijo en codigo) --
-          PULLBACK_MIN_CONFLUENCE: "2"
-          PULLBACK_MIN_RS: "0.0"
-          PULLBACK_MIN_ADX: "18.0"
-          PULLBACK_MIN_SCORE_BONUS: "0.3"
-          PULLBACK_MAX_BARS: "12"
         run: |
           python backtest.py --years 3 --export-features
 
