@@ -24,6 +24,18 @@ Iteración 2.1:
   - Energy: XOM, CVX (nuevo grupo)
   - ETFs sectoriales: XLK, XLF, XLV, XLI, XLE, XLP
 
+  === Iteracion 2.10 — Sistema Breakout Puro ===
+  Decision basada en backtest post-v2.9:
+  - breakout: 0.269R con costos, 249 trades, edge robusto
+  - pullback: 0.009R con costos, 21 trades, expectancy practicamente nula
+  - El edge esta enteramente en breakout. Pullback solo agrega complejidad sin valor.
+  Cambios:
+  - Eliminada toda logica de detectar/scorear pullback
+  - Eliminadas env vars PULLBACK_* (5 vars + sizing factor)
+  - signal_type ahora siempre es "breakout" o "none" (no mas "pullback")
+  - Tracker simplificado: TRACKER_MAX_BARS_OPEN unico para todos
+  - Sizing simplificado: 1x para todos los breakouts (sin factor reducido)
+
   === Iteracion 2.9 — Refactor + Fix Look-Ahead (Auditoria Externa) ===
   Hallazgos criticos resueltos de revision externa:
   - Fix #1: simulate_trade entra en signal_bar+1 con Open (no signal_bar) — antes
@@ -308,17 +320,7 @@ SUPERTREND_BLOCK_RS_NEG  = os.getenv("SUPERTREND_BLOCK_RS_NEG", "true").lower() 
 # #4: Sector ETFs RS floor absoluto — XLP con RS=-6.79% nunca deberia pasar
 ETF_RS_FLOOR             = float(os.getenv("ETF_RS_FLOOR", "-3.0"))
 
-# ── Iteracion 2.7 — Pullback Hardening ───────────────────────────────────────
-# Backtest Fase B mostro pullback degradandose (-0.138R primera vs segunda mitad)
-# Solucion: filtros mas estrictos SOLO para pullback, breakout queda igual
-# v2.8: thresholds relajados (v2.7 dejaba pullback en n=0)
-PULLBACK_MIN_CONFLUENCE = int(os.getenv("PULLBACK_MIN_CONFLUENCE", "2"))
-PULLBACK_MIN_RS         = float(os.getenv("PULLBACK_MIN_RS", "0.0"))
-PULLBACK_MIN_ADX        = float(os.getenv("PULLBACK_MIN_ADX", "18.0"))
-PULLBACK_MIN_SCORE_BONUS = float(os.getenv("PULLBACK_MIN_SCORE_BONUS", "0.3"))
-PULLBACK_MAX_BARS       = int(os.getenv("PULLBACK_MAX_BARS", "12"))
-# v2.8: sizing reducido para pullback — fijo en 50% del riesgo de breakout
-PULLBACK_SIZING_FACTOR  = 0.5
+# v2.10: Eliminadas env vars PULLBACK_* — sistema es breakout puro
 
 # v2.5 Fix #3: tracking de simbolos donde fallo earnings — para reportarlo al final
 EARNINGS_FAILURES: set[str] = set()
@@ -408,7 +410,7 @@ class StockSignal:
 
     @property
     def should_alert(self) -> bool:
-        playbook_ok = self.signal_type in {"pullback", "breakout"} or not REQUIRE_PLAYBOOK  # v2.3: hybrid deshabilitado (avg_R=-0.208)
+        playbook_ok = self.signal_type == "breakout" or not REQUIRE_PLAYBOOK  # v2.10: solo breakout
         # v2.4: ETFs sectoriales siempre alertan; SPY/QQQ solo si ALERT_ETFS=true
         benchmark_ok = ALERT_ETFS or self.symbol not in INDEX_ETFS
         # v2.2: RS minima por grupo — Finance/Health tienen threshold mas permisivo
@@ -876,15 +878,12 @@ def update_alert_history_tracker() -> dict[str, int]:
                 exit_reason = "target_hit"
                 break
 
-        # v2.7: time-stop diferenciado por playbook
-        playbook = (row.get("playbook") or "").strip().lower()
-        max_bars_for_trade = PULLBACK_MAX_BARS if playbook == "pullback" else TRACKER_MAX_BARS_OPEN
-
-        if exit_status == "open" and bars_open >= max_bars_for_trade:
+        # v2.10: time-stop unico (solo breakout en sistema)
+        if exit_status == "open" and bars_open >= TRACKER_MAX_BARS_OPEN:
             exit_status = "expired"
             exit_price = current_price
             exit_date = trade_df.index[-1].date().isoformat()
-            exit_reason = f"time_stop_{max_bars_for_trade}_bars"
+            exit_reason = f"time_stop_{TRACKER_MAX_BARS_OPEN}_bars"
 
         row["status"] = exit_status
         row["last_checked_utc"] = now_utc
@@ -1247,15 +1246,13 @@ def compute_market_breadth() -> Optional[float]:
     return round(pct, 1)
 
 
-# ── v2.5 #7 + v2.8: Position sizing diferenciado por playbook ────────────────
+# ── v2.5 #7 + v2.10: Position sizing simplificado (solo breakout) ───────────
 def compute_position_size(entry: float, stop: float, playbook: str = "breakout") -> tuple[int, float, float]:
     """Calcula # acciones, $ posicion, $ riesgo basado en RISK_PER_TRADE_PCT.
-    v2.8: pullback usa PULLBACK_SIZING_FACTOR (0.5) — mitad del riesgo de breakout.
+    v2.10: sizing 1x para todos (eliminado pullback factor).
     Returns (shares, position_usd, risk_usd)."""
     risk_per_share = max(entry - stop, 0.01)
-    # v2.8: aplicar sizing factor para playbook secundario
-    sizing_factor = PULLBACK_SIZING_FACTOR if playbook == "pullback" else 1.0
-    risk_budget    = ACCOUNT_SIZE_USD * (RISK_PER_TRADE_PCT / 100.0) * sizing_factor
+    risk_budget    = ACCOUNT_SIZE_USD * (RISK_PER_TRADE_PCT / 100.0)
     shares = int(risk_budget / risk_per_share)
     position_usd = shares * entry
     risk_usd     = shares * risk_per_share
@@ -1572,12 +1569,7 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         )
     )
 
-    is_pullback = (
-        pullback_trend_strong
-        and 0.15 <= pullback_atr <= PULLBACK_MAX_ATR
-        and SETUP_RSI_MIN <= rsi <= max(SETUP_RSI_MAX, 68)
-    )
-
+    # v2.10: solo breakout — pullback eliminado por backtest (expectancy 0.009R)
     is_breakout = (
         breakout_structure
         and vol_ratio >= 0.95
@@ -1588,22 +1580,14 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         and entry > ema50
     )
 
-    # v2.8: Cascada de clasificacion FIJA
-    # 1. Pullback PRIMERO (estricto). Si califica -> pullback (sin contaminar)
-    # 2. Breakout SEGUNDO. Solo entra si cumple SUS reglas, no como fallback de pullback
-    # 3. Si ninguno califica -> descartado (hybrid eliminado completamente)
-    if is_pullback:
-        signal_type = "pullback"
-        setup_score += 1.0
-        reasons.append("Playbook activo: Pullback Continuation (secundario, sizing reducido)")
-    elif is_breakout:
+    if is_breakout:
         signal_type = "breakout"
         trigger_score += 1.2
-        reasons.append("Playbook activo: Breakout Expansion (motor principal)")
+        reasons.append("Playbook: Breakout Expansion")
 
     if signal_type == "none":
         setup_score -= 0.7
-        warnings.append("No encaja limpio en pullback ni breakout")
+        warnings.append("No encaja como breakout")
 
     score_adjustment, context_note = normalize_caution_adjustment(sym_context)
     if vix is not None and VIX_CAUTION_LEVEL <= vix < VIX_BLOCK_LEVEL:
@@ -1649,25 +1633,7 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     if context_note:
         reasons.append(f"Contexto: {context_note}")
 
-    # v2.7: filtros estrictos solo para pullback (backtest mostro edge degradandose)
-    if signal_type == "pullback":
-        if confluence_count < PULLBACK_MIN_CONFLUENCE:
-            blocked.append(
-                f"Pullback hardening: confluence {confluence_count}/5 < {PULLBACK_MIN_CONFLUENCE} requerido"
-            )
-        if rs20 < PULLBACK_MIN_RS:
-            blocked.append(
-                f"Pullback hardening: RS={rs20:+.2f}% < {PULLBACK_MIN_RS}% requerido (sin liderazgo)"
-            )
-        if adx < PULLBACK_MIN_ADX:
-            blocked.append(
-                f"Pullback hardening: ADX={adx:.1f} < {PULLBACK_MIN_ADX} requerido (tendencia debil)"
-            )
-        if total_score < (MIN_SCORE + PULLBACK_MIN_SCORE_BONUS):
-            blocked.append(
-                f"Pullback hardening: score {total_score:.1f} < {MIN_SCORE + PULLBACK_MIN_SCORE_BONUS:.1f} requerido"
-            )
-
+    # v2.10: pullback hardening eliminado (no hay pullback)
     range_20 = max(prior_high_20 - prior_low_20, 1.2 * atr)
     measured_move = max(0.75 * range_20, 1.6 * atr)
 
@@ -1685,26 +1651,6 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
             prior_high_20 + 0.20 * atr,
             entry + measured_move,
             entry + 1.25 * risk,
-        )
-
-    elif signal_type == "hybrid":
-        raw_stop = max(prior_low_5 - 0.20 * atr, ema20 - 0.45 * atr, entry - 1.05 * atr)
-        stop = min(raw_stop, entry - 0.15 * atr)
-        risk = entry - stop
-        tp = max(
-            prior_high_20 + 0.15 * atr,
-            entry + max(0.60 * range_20, 1.5 * atr),
-            entry + 1.20 * risk,
-        )
-
-    elif signal_type == "pullback":
-        raw_stop = min(prior_swing_low - 0.12 * atr, ema50 - 0.12 * atr, entry - 0.80 * atr)
-        stop = min(raw_stop, entry - 0.15 * atr)
-        risk = entry - stop
-        tp = max(
-            prior_high_20 + 0.10 * atr,
-            entry + max(0.55 * range_20, 1.3 * atr),
-            entry + 1.15 * risk,
         )
 
     else:
@@ -1795,13 +1741,8 @@ def format_alert(sig: StockSignal, vix: Optional[float]) -> str:
     vix_line = f"📉 *VIX:* {vix:.1f}\n" if vix is not None else ""
     earnings_line = f"📅 *Próximos earnings:* {sig.earnings_date}\n" if sig.earnings_date else ""
     rs_line = f"⚔️ *RS vs SPY (20d):* {sig.rs20:+.2f}%\n" if sig.symbol != "SPY" else ""
-    # v2.8: distinguir motor principal (breakout) vs secundario (pullback)
-    if sig.signal_type == "pullback":
-        signal_type_line = f"🟡 *Playbook:* {sig.signal_type} (SECUNDARIO — sizing 50%)\n"
-    elif sig.signal_type == "breakout":
-        signal_type_line = f"🚀 *Playbook:* {sig.signal_type} (PRINCIPAL)\n"
-    else:
-        signal_type_line = ""
+    # v2.10: solo breakout
+    signal_type_line = f"🚀 *Playbook:* breakout\n" if sig.signal_type == "breakout" else ""
     trigger_line = f"🕯️ *Trigger candle:* {sig.trigger_candle_utc}\n"
     st_emoji = "🟢" if sig.supertrend_bull else "🔴"
     st_dir = "ALCISTA" if sig.supertrend_bull else "BAJISTA"
