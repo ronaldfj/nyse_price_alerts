@@ -138,14 +138,7 @@ for _e in FINAL_RS_MIN_BY_GROUP_RAW.split(","):
 
 # Backtest-especifico
 # v2.7: Pullback Hardening (Backtest Fase B mostro pullback degradandose)
-# v2.8: thresholds relajados (v2.7 dejaba pullback en n=0)
-PULLBACK_MIN_CONFLUENCE = int(os.getenv("PULLBACK_MIN_CONFLUENCE", "2"))
-PULLBACK_MIN_RS         = float(os.getenv("PULLBACK_MIN_RS", "0.0"))
-PULLBACK_MIN_ADX        = float(os.getenv("PULLBACK_MIN_ADX", "18.0"))
-PULLBACK_MIN_SCORE_BONUS = float(os.getenv("PULLBACK_MIN_SCORE_BONUS", "0.3"))
-PULLBACK_MAX_BARS       = int(os.getenv("PULLBACK_MAX_BARS", "12"))
-# v2.8: sizing reducido fijo
-PULLBACK_SIZING_FACTOR  = 0.5
+# v2.10: pullback eliminado del sistema
 
 COOLDOWN_BARS       = int(os.getenv("BT_COOLDOWN_BARS", "5"))   # barras entre señales del mismo simbolo
 MAX_BARS_HOLD       = int(os.getenv("BT_MAX_BARS_HOLD", "15"))  # time-stop
@@ -506,29 +499,20 @@ def evaluate_bar(
         or (broke_prior_high_5 and positive_momentum and trigger_score >= 1.6
             and entry >= prior_high_20 * 0.985)
     )
-    is_pullback = (
-        pullback_trend_strong
-        and 0.15 <= pullback_atr <= PULLBACK_MAX_ATR
-        and SETUP_RSI_MIN <= rsi <= max(SETUP_RSI_MAX, 68)
-    )
+    # v2.10: solo breakout (pullback eliminado por backtest 0.009R)
     is_breakout = (
         breakout_structure and vol_ratio >= 0.95 and rs20 >= BREAKOUT_RS_MIN
         and adx >= 18 and rsi <= BREAKOUT_RSI_MAX
         and pullback_atr <= BREAKOUT_MAX_ATR and entry > ema50
     )
-    # v2.8: Cascada de clasificacion FIJA — pullback PRIMERO, sin reclasificacion
-    if is_pullback:
-        signal_type = "pullback"
-        setup_score += 1.0
-        reasons.append("Playbook: Pullback Continuation (secundario)")
-    elif is_breakout:
+    if is_breakout:
         signal_type = "breakout"
         trigger_score += 1.2
-        reasons.append("Playbook: Breakout Expansion (principal)")
+        reasons.append("Playbook: Breakout Expansion")
 
     if signal_type == "none":
         setup_score -= 0.7
-        warnings.append("Sin playbook definido")
+        warnings.append("Sin breakout valido")
 
     # ── VIX caution ────────────────────────────────────────────────────────
     score_adjustment = 0.0
@@ -596,17 +580,6 @@ def evaluate_bar(
     if rr < effective_min_rr and extension_pct > ADAPTIVE_RR_EXT_THRESHOLD:
         blocked.append(f"Adaptive RR {rr:.2f} < {effective_min_rr:.2f}")
 
-    # v2.7: filtros estrictos solo para pullback (backtest mostro edge degradandose)
-    if signal_type == "pullback":
-        if confluence_count < PULLBACK_MIN_CONFLUENCE:
-            return None
-        if rs20 < PULLBACK_MIN_RS:
-            return None
-        if adx < PULLBACK_MIN_ADX:
-            return None
-        if total_score < (MIN_SCORE + PULLBACK_MIN_SCORE_BONUS):
-            return None
-
     # ── Filtros finales ────────────────────────────────────────────────────
     if blocked:
         return None
@@ -614,7 +587,7 @@ def evaluate_bar(
         return None
     if rr < MIN_RR:
         return None
-    if REQUIRE_PLAYBOOK and signal_type not in {"pullback", "breakout"}:
+    if REQUIRE_PLAYBOOK and signal_type != "breakout":
         return None
     rs_min = FINAL_RS_MIN_BY_GROUP.get(group, FINAL_RS_MIN)
     if rs20 < rs_min:
@@ -669,11 +642,11 @@ def simulate_trade(df: pd.DataFrame, signal_bar: int, entry: float, target: floa
     """
     Itera sobre barras posteriores a signal_bar para detectar hit_target / hit_stop / expired.
     Usa High/Low de cada barra — conservador: si ambos se tocan en la misma barra, stop gana.
-    v2.7: time-stop diferenciado — pullback usa PULLBACK_MAX_BARS (12), breakout MAX_BARS_HOLD (15).
+    v2.10: time-stop unico (solo breakout en sistema).
+    v2.9: entrada en signal_bar+1 con Open (sin look-ahead).
     """
     n = len(df)
-    # v2.7: time-stop especifico por playbook
-    max_bars = PULLBACK_MAX_BARS if playbook == "pullback" else MAX_BARS_HOLD
+    max_bars = MAX_BARS_HOLD
 
     # v2.9 Fix #1: ENTRY EFECTIVO en signal_bar+1 (Open de la barra siguiente)
     # Antes: iteraba desde signal_bar — look-ahead, sobrestima win rate
