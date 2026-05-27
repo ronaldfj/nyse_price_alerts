@@ -46,7 +46,6 @@ import yfinance as yf
 from signals import (
     add_indicators as _signals_add_indicators,
     compute_relative_strength as _signals_compute_rs,
-    compute_supertrend_vectorized as _signals_supertrend,
 )
 
 # ---------------------------------------------------------------------------
@@ -162,56 +161,6 @@ TRADE_COLUMNS = [
     "confluence_count", "adx_at_entry", "vix_proxy",
 ]
 
-# ---------------------------------------------------------------------------
-# Indicadores (copiado de alert.py — sin modificar para garantizar paridad)
-# ---------------------------------------------------------------------------
-
-def compute_supertrend_vectorized(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0) -> pd.DataFrame:
-    n = len(df)
-    high  = df["High"].to_numpy(dtype=float)
-    low   = df["Low"].to_numpy(dtype=float)
-    close = df["Close"].to_numpy(dtype=float)
-
-    tr = np.maximum(
-        high - low,
-        np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))),
-    )
-    tr[0] = high[0] - low[0]
-
-    alpha = 1.0 / period
-    rma = np.empty(n, dtype=float)
-    rma[0] = tr[0]
-    for i in range(1, n):
-        rma[i] = alpha * tr[i] + (1.0 - alpha) * rma[i - 1]
-
-    hl2 = (high + low) / 2.0
-    upper_raw = hl2 + multiplier * rma
-    lower_raw = hl2 - multiplier * rma
-
-    upper = upper_raw.copy()
-    lower = lower_raw.copy()
-    trend = np.ones(n, dtype=float)
-    st_value = np.empty(n, dtype=float)
-    st_value[0] = upper_raw[0]
-
-    for i in range(1, n):
-        upper[i] = upper_raw[i] if (upper_raw[i] < upper[i-1] or close[i-1] > upper[i-1]) else upper[i-1]
-        lower[i] = lower_raw[i] if (lower_raw[i] > lower[i-1] or close[i-1] < lower[i-1]) else lower[i-1]
-        if trend[i-1] == -1.0:
-            trend[i] = 1.0 if close[i] > upper[i-1] else -1.0
-        else:
-            trend[i] = -1.0 if close[i] < lower[i-1] else 1.0
-        st_value[i] = lower[i] if trend[i] == 1.0 else upper[i]
-
-    out = df.copy()
-    out["st_atr"]      = rma
-    out["st_upper"]    = upper
-    out["st_lower"]    = lower
-    out["st_trend"]    = trend
-    out["st_value"]    = st_value
-    return out
-
-
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """v2.9: delega al modulo signals.py — unica fuente de verdad."""
     return _signals_add_indicators(
@@ -248,9 +197,17 @@ def fetch_data(symbol: str, years: int = 5) -> Optional[pd.DataFrame]:
 def compute_rs(symbol_closes: pd.Series, spy_closes: pd.Series, i: int) -> float:
     if i < RS_LOOKBACK + 2:
         return 0.0
-    # usamos i-1 como "last confirmed close" (anti look-ahead)
-    asset_ret = (symbol_closes.iloc[i-1] / symbol_closes.iloc[i-1-RS_LOOKBACK] - 1.0) * 100
-    spy_ret   = (spy_closes.iloc[i-1]   / spy_closes.iloc[i-1-RS_LOOKBACK]   - 1.0) * 100
+    asset_base = float(symbol_closes.iloc[i - 1 - RS_LOOKBACK])
+    spy_base   = float(spy_closes.iloc[i - 1 - RS_LOOKBACK])
+    # Guard: precio cero o negativo indica datos corruptos
+    if asset_base <= 0.0 or spy_base <= 0.0:
+        return 0.0
+    asset_val = float(symbol_closes.iloc[i - 1])
+    spy_val   = float(spy_closes.iloc[i - 1])
+    if np.isnan(asset_val) or np.isnan(spy_val):
+        return 0.0
+    asset_ret = (asset_val / asset_base - 1.0) * 100
+    spy_ret   = (spy_val   / spy_base   - 1.0) * 100
     return round(asset_ret - spy_ret, 2)
 
 

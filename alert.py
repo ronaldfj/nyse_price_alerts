@@ -116,6 +116,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -129,7 +130,6 @@ import yfinance as yf
 from signals import (
     add_indicators as _signals_add_indicators,
     compute_relative_strength as _signals_compute_rs,
-    compute_supertrend_vectorized as _signals_supertrend,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -324,6 +324,9 @@ ETF_RS_FLOOR             = float(os.getenv("ETF_RS_FLOOR", "-3.0"))
 
 # v2.5 Fix #3: tracking de simbolos donde fallo earnings — para reportarlo al final
 EARNINGS_FAILURES: set[str] = set()
+
+# Cache de earnings: poblado por prefetch_earnings_parallel antes del scan principal
+_EARNINGS_CACHE: dict[str, tuple[Optional[str], bool]] = {}
 
 DEFAULT_CONTEXT_CANDIDATES = (
     os.getenv("MARKET_CONTEXT_FILE", ""),
@@ -991,6 +994,8 @@ def fetch_vix() -> Optional[float]:
 def get_earnings_info(symbol: str) -> tuple[Optional[str], bool]:
     if STOCK_GROUPS.get(symbol) == "ETF":
         return None, False
+    if symbol in _EARNINGS_CACHE:
+        return _EARNINGS_CACHE[symbol]
 
     try:
         ticker = yf.Ticker(symbol)
@@ -1042,80 +1047,26 @@ def get_earnings_info(symbol: str) -> tuple[Optional[str], bool]:
         return None, False
 
 
-# ── Supertrend (vectorizado, O(n) sin loops Python) ──────────────────────────
-def compute_supertrend_vectorized(
-    df: pd.DataFrame,
-    period: int = 10,
-    multiplier: float = 3.0,
-) -> pd.DataFrame:
-    """
-    Calcula Supertrend completamente vectorizado usando numpy.
-    Columnas añadidas:
-      st_atr        – ATR(period) con RMA (Wilder)
-      st_upper_raw  – banda superior sin suavizado
-      st_lower_raw  – banda inferior sin suavizado
-      st_upper      – banda superior final (suavizada por lógica Supertrend)
-      st_lower      – banda inferior final
-      st_trend      – 1 = alcista, -1 = bajista
-      st_value      – valor activo del Supertrend en cada barra
-    Complejidad: O(n) — un único loop numpy sobre el array de precios.
-    """
-    import numpy as np
-
-    n = len(df)
-    high = df["High"].to_numpy(dtype=float)
-    low = df["Low"].to_numpy(dtype=float)
-    close = df["Close"].to_numpy(dtype=float)
-
-    # RMA (Wilder) del TR — idéntico al ATR de Pine Script
-    tr = np.maximum(
-        high - low,
-        np.maximum(
-            np.abs(high - np.roll(close, 1)),
-            np.abs(low - np.roll(close, 1)),
-        ),
-    )
-    tr[0] = high[0] - low[0]
-
-    alpha = 1.0 / period
-    rma = np.empty(n, dtype=float)
-    rma[0] = tr[0]
-    for i in range(1, n):
-        rma[i] = alpha * tr[i] + (1.0 - alpha) * rma[i - 1]
-
-    hl2 = (high + low) / 2.0
-    upper_raw = hl2 + multiplier * rma
-    lower_raw = hl2 - multiplier * rma
-
-    # Iteración única para aplicar la lógica de suavizado de bandas
-    upper = upper_raw.copy()
-    lower = lower_raw.copy()
-    trend = np.ones(n, dtype=float)   # 1 = bull, -1 = bear
-    st_value = np.empty(n, dtype=float)
-    st_value[0] = upper_raw[0]
-
-    for i in range(1, n):
-        # Banda superior: sólo se actualiza a la baja si el cierre anterior estaba por debajo
-        upper[i] = upper_raw[i] if (upper_raw[i] < upper[i - 1] or close[i - 1] > upper[i - 1]) else upper[i - 1]
-        # Banda inferior: sólo se actualiza al alza si el cierre anterior estaba por encima
-        lower[i] = lower_raw[i] if (lower_raw[i] > lower[i - 1] or close[i - 1] < lower[i - 1]) else lower[i - 1]
-
-        if trend[i - 1] == -1.0:
-            trend[i] = 1.0 if close[i] > upper[i - 1] else -1.0
-        else:
-            trend[i] = -1.0 if close[i] < lower[i - 1] else 1.0
-
-        st_value[i] = lower[i] if trend[i] == 1.0 else upper[i]
-
-    out = df.copy()
-    out["st_atr"] = rma
-    out["st_upper_raw"] = upper_raw
-    out["st_lower_raw"] = lower_raw
-    out["st_upper"] = upper
-    out["st_lower"] = lower
-    out["st_trend"] = trend
-    out["st_value"] = st_value
-    return out
+def prefetch_earnings_parallel(symbols: list[str], max_workers: int = 10) -> None:
+    """Precarga earnings info para todos los simbolos no-ETF en paralelo.
+    Popula _EARNINGS_CACHE para que evaluate_stock() no haga requests individuales."""
+    global _EARNINGS_CACHE
+    non_etf = [s for s in symbols if STOCK_GROUPS.get(s) != "ETF"]
+    if not non_etf:
+        return
+    log.info("Prefetch earnings paralelo: %s simbolos (max_workers=%s)...", len(non_etf), max_workers)
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(get_earnings_info, s): s for s in non_etf}
+        for future in as_completed(futures):
+            sym = futures[future]
+            try:
+                _EARNINGS_CACHE[sym] = future.result()
+            except Exception as exc:
+                log.debug("Earnings prefetch %s: %s", sym, exc)
+                _EARNINGS_CACHE[sym] = (None, False)
+    log.info("Prefetch earnings completado en %.1fs (%s/%s OK)",
+             time.time() - t0, len(_EARNINGS_CACHE), len(non_etf))
 
 
 # ── Indicadores técnicos ──────────────────────────────────────────────────────
@@ -1827,6 +1778,9 @@ def main() -> None:
     # v2.5 Fix #4: batch download al inicio — todos los simbolos + breadth proxies + SPY/VIX
     all_symbols_to_fetch = list(set(STOCKS + BREADTH_PROXY_SYMBOLS + ["SPY"]))
     prefetch_all_data(all_symbols_to_fetch)
+
+    # Prefetch earnings en paralelo mientras el batch download ya completó
+    prefetch_earnings_parallel(STOCKS)
 
     vix = fetch_vix()
     if vix is not None:

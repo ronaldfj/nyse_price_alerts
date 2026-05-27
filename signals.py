@@ -50,21 +50,21 @@ def compute_supertrend_vectorized(
     low = df["Low"].to_numpy(dtype=float)
     close = df["Close"].to_numpy(dtype=float)
 
-    # RMA (Wilder) del TR
+    # RMA (Wilder) del TR — vectorizado via pandas EWM (misma inicializacion que add_indicators)
+    prev_close = np.empty(n, dtype=float)
+    prev_close[0] = close[0]
+    prev_close[1:] = close[:-1]
     tr = np.maximum(
         high - low,
         np.maximum(
-            np.abs(high - np.roll(close, 1)),
-            np.abs(low - np.roll(close, 1)),
+            np.abs(high - prev_close),
+            np.abs(low - prev_close),
         ),
     )
     tr[0] = high[0] - low[0]
 
     alpha = 1.0 / period
-    rma = np.empty(n, dtype=float)
-    rma[0] = tr[0]
-    for i in range(1, n):
-        rma[i] = alpha * tr[i] + (1.0 - alpha) * rma[i - 1]
+    rma = pd.Series(tr).ewm(alpha=alpha, adjust=False).mean().to_numpy()
 
     hl2 = (high + low) / 2.0
     upper_raw = hl2 + multiplier * rma
@@ -180,6 +180,7 @@ def compute_relative_strength(
     df: pd.DataFrame,
     spy_df: Optional[pd.DataFrame],
     lookback: int = RS_LOOKBACK_DEFAULT,
+    symbol: str = "",
 ) -> float:
     """
     Calcula la diferencia de retornos entre el activo y SPY en `lookback` sesiones.
@@ -195,11 +196,26 @@ def compute_relative_strength(
     if len(common_idx) < lookback + 2:
         return 0.0
 
-    asset_aligned = df["Close"].reindex(common_idx)
-    spy_aligned = spy_df["Close"].reindex(common_idx)
+    asset_aligned = df["Close"].reindex(common_idx).dropna()
+    spy_aligned = spy_df["Close"].reindex(common_idx).dropna()
 
-    asset_ret = (float(asset_aligned.iloc[-2]) / float(asset_aligned.iloc[-2 - lookback]) - 1.0) * 100
-    spy_ret = (float(spy_aligned.iloc[-2]) / float(spy_aligned.iloc[-2 - lookback]) - 1.0) * 100
+    # Re-intersectar tras dropna: un NaN en posiciones distintas reduce el universo comun
+    valid_idx = asset_aligned.index.intersection(spy_aligned.index)
+    if len(valid_idx) < lookback + 2:
+        return 0.0
+
+    asset_aligned = asset_aligned.loc[valid_idx]
+    spy_aligned = spy_aligned.loc[valid_idx]
+
+    asset_base = float(asset_aligned.iloc[-2 - lookback])
+    spy_base = float(spy_aligned.iloc[-2 - lookback])
+
+    # Guard contra precios cero o negativos (datos corruptos)
+    if asset_base <= 0.0 or spy_base <= 0.0:
+        return 0.0
+
+    asset_ret = (float(asset_aligned.iloc[-2]) / asset_base - 1.0) * 100
+    spy_ret = (float(spy_aligned.iloc[-2]) / spy_base - 1.0) * 100
     return round(asset_ret - spy_ret, 2)
 
 
