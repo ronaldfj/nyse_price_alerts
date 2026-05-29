@@ -438,6 +438,9 @@ def evaluate_bar(
     if pullback_atr > BREAKOUT_ATR_GATE and vol_ratio < effective_vol_gate:
         trigger_score -= 0.7
         warnings.append(f"Breakout extendido sin vol ({pullback_atr:.2f} ATR, {vol_ratio:.2f}x)")
+        # v2.11: penalty adicional en setup_score para bucket 2.0-2.5 ATR (exp=-0.274R, n=34)
+        if 2.0 <= pullback_atr < 2.5:
+            setup_score -= 0.5
 
     # v2.1: volume profile — 3 velas decrecientes
     if i >= VOLUME_PROFILE_LOOKBACK + 2:

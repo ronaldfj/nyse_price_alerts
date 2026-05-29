@@ -1497,6 +1497,15 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
             f"Breakout extendido sin vol suficiente ({pullback_atr:.2f} ATR, "
             f"vol={vol_ratio:.2f}x < {effective_vol_gate:.1f}x requerido, VIX={vix})"
         )
+        # v2.11: Setup penalty adicional para el bucket 2.0-2.5 ATR + vol insuficiente.
+        # Backtest n=56: WR=35.7%, exp=+0.070R vs global +0.251R.
+        # Con confluence=3: n=34, WR=29.4%, exp=-0.274R — expectancy negativa confirmada.
+        # El penalty de trigger (-0.70) no era suficiente para bajar el score por debajo de MIN_SCORE.
+        if 2.0 <= pullback_atr < 2.5:
+            setup_score -= 0.5
+            warnings.append(
+                f"Setup penalty: zona de bajo edge (ext={pullback_atr:.2f} ATR, vol insuficiente)"
+            )
 
     # v2.1: Volume profile filter — 3 velas de volumen decreciente = posible distribucion
     if len(df) >= VOLUME_PROFILE_LOOKBACK + 2:
