@@ -1775,7 +1775,7 @@ def main() -> None:
     log.info("Iniciando escaneo v2.6 [%s] — %s simbolos", mode, len(STOCKS))
     log.info("Historico CSV: %s", ALERTS_HISTORY_FILE)
 
-    tracker_stats = update_alert_history_tracker()
+    tracker_stats = update_alert_history_tracker() if not DRY_RUN else {"open_checked": 0, "hit_target": 0, "hit_stop": 0, "expired": 0, "still_open": 0, "invalid": 0}
     if tracker_stats["open_checked"] > 0:
         log.info(
             "Tracker historico | Revisadas:%s | Target:%s | Stop:%s | Expiradas:%s | Abiertas:%s | Invalidas:%s",
@@ -1885,10 +1885,11 @@ def main() -> None:
         # Emitir alertas finales
         for sig in approved:
             if send_telegram(format_alert(sig, vix)):
-                append_alert_history(sig, vix)
-                history_rows = load_alert_history_rows()
-                state[sig.symbol] = now
-                save_state(state)
+                if not DRY_RUN:
+                    append_alert_history(sig, vix)
+                    history_rows = load_alert_history_rows()
+                    state[sig.symbol] = now
+                    save_state(state)
                 stats["alerts"] += 1
                 log.info(
                     "✅ ALERTA %s | score=%.1f | rank=%.2f | confluence=%s/5 | RR=%.2f | playbook=%s | RS20=%+.2f%%",
