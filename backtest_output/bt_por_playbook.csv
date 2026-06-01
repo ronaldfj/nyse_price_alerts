@@ -1,2 +1,2 @@
 playbook,n,win_rate_%,stops_%,expired_%,avg_realized_R,avg_rr,avg_score,avg_mfe_%,avg_mae_%
-breakout,254,24.8,46.5,28.7,0.276,2.44,9.06,3.77,-2.48
+breakout,251,24.3,46.6,29.1,0.265,2.44,9.07,3.71,-2.49
