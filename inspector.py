@@ -458,22 +458,30 @@ with right:
 
         st.markdown("**Tendencia**")
         c1, c2, c3 = st.columns(3)
-        c1.metric("Supertrend", "Alcista" if sig.supertrend_bull else "Bajista")
-        c2.metric("ADX (14)", f"{sig.adx:.1f}")
-        c3.metric("Extensión EMA200", f"{sig.extension_pct:.1f}%")
+        c1.metric("Supertrend", "Alcista" if sig.supertrend_bull else "Bajista",
+                  help="Régimen de precio: Alcista = precio sobre la línea Supertrend (period=10, mult=3.0). Bajista bloquea alertas si ADX ≥ 15.")
+        c2.metric("ADX (14)", f"{sig.adx:.1f}",
+                  help="Fuerza de tendencia: <20 débil, 20–40 moderada, >40 fuerte. Supertrend bajista + ADX ≥ 15 = hard block.")
+        c3.metric("Extensión EMA200", f"{sig.extension_pct:.1f}%",
+                  help="Distancia del precio a la EMA200. >20% aplica penalización cuadrática al score. >30% = hard block.")
 
         c4, c5, c6 = st.columns(3)
-        c4.metric("ATR (14)", f"${sig.atr:.2f}")
-        c5.metric("RS vs SPY (60d)", f"{sig.rs20:+.2f}%")
-        c6.metric("Supertrend val", f"{sig.supertrend_val:.2f}")
+        c4.metric("ATR (14)", f"${sig.atr:.2f}",
+                  help="Volatilidad promedio diaria en dólares (Average True Range). Se usa para calcular stop, target y gates de breakout.")
+        c5.metric("RS vs SPY (60d)", f"{sig.rs20:+.2f}%",
+                  help="Rendimiento relativo vs SPY en 60 días. Positivo = outperform. Se ajusta por grupo: Finance/Health admiten hasta -4%.")
+        c6.metric("Supertrend val", f"{sig.supertrend_val:.2f}",
+                  help="Nivel de precio de la línea Supertrend — actúa como soporte dinámico en régimen alcista.")
 
         st.divider()
         st.markdown("**Momentum**")
         d1, d2, d3 = st.columns(3)
         d1.metric("RSI (14)", f"{sig.rsi:.1f}",
-                  help="Zona ideal: 45–65")
-        d2.metric("Precio", f"${sig.price:.2f}")
-        d3.metric("Grupo / Sector", sig.group if sig.group != "Other" else "—")
+                  help="Zona ideal: 45–65. >80 = hard block por sobreextensión. Usa método Wilder (EWM α=1/14).")
+        d2.metric("Precio", f"${sig.price:.2f}",
+                  help="Último cierre ajustado (splits y dividendos). Es el precio de entrada de referencia para calcular stop y target.")
+        d3.metric("Grupo / Sector", sig.group if sig.group != "Other" else "—",
+                  help="Clasificación sectorial del símbolo. Determina el umbral mínimo de RS vs SPY aplicable.")
 
         st.divider()
         st.markdown("**Referencia de niveles**")
