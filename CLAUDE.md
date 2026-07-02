@@ -184,7 +184,7 @@ total_score = regime_score + setup_score + trigger_score + confluence_bonus
 ```
 VIX >= 30                    → bloqueo total
 Supertrend bear + ADX >= 15  → bloqueo
-RSI > 80                     → bloqueo (sobreextensión)
+RSI > 75                     → bloqueo (sobreextensión)
 Extension > 30%              → bloqueo
 Earnings dentro de 5 días    → bloqueo
 Gap overnight > 2%           → bloqueo (BREAKOUT_GAP_BLOCK_PCT)
@@ -200,8 +200,8 @@ Confluencia 2  → -0.30 score penalty
 
 ### Umbrales Mínimos
 ```
-MIN_SCORE = 5.8  (recomendado 6.0 en producción)
-MIN_RR    = 1.6  (adaptive: ×1.25 si extension >20%)
+MIN_SCORE = 5.8
+MIN_RR    = 0.8  (adaptive: ×1.25 si extension >20%)
 ```
 
 ---
@@ -271,17 +271,18 @@ Ante cualquier requerimiento de cambio, aplicar este orden:
 ```bash
 # Scoring
 MIN_SCORE=5.8
-MIN_RR=1.6
+MIN_RR=0.8
 COOLDOWN_HOURS=48
 POST_STOP_COOLDOWN_HOURS=72
 
 # RSI gates
 SETUP_RSI_MIN=45
-SETUP_RSI_MAX=65
-BREAKOUT_RSI_MAX=80
+SETUP_RSI_MAX=66
+BREAKOUT_RSI_MAX=75
 
 # Breakout gates
-BREAKOUT_ATR_GATE=0.25
+BREAKOUT_ATR_GATE=2.0
+BREAKOUT_MAX_ATR=3.20
 BREAKOUT_EXTENDED_VOL_RATIO=1.8
 BREAKOUT_EXTENDED_VOL_RATIO_LOW_VIX=1.5   # cuando VIX<18
 
@@ -297,19 +298,26 @@ CONFLUENCE_HARD_FLOOR=2
 CONFLUENCE_SOFT_FLOOR=3
 
 # Risk
-ACCOUNT_SIZE_USD=50000
-RISK_PER_TRADE_PCT=0.01
-GAP_BLOCK_PCT=0.02
-BREADTH_MIN_PCT=0.40
+ACCOUNT_SIZE_USD=10000
+RISK_PER_TRADE_PCT=1.0
+GAP_BLOCK_PCT=2.0
+GAP_FILTER_ENABLED=true
+BREADTH_MIN_PCT=50.0
+BREADTH_BLOCK_BELOW=40.0
 
 # RS
-RS_LOOKBACK=60
-FINAL_RS_MIN=-0.02
-FINAL_RS_MIN_BY_GROUP=Finance:-0.04,Health:-0.04,Consumer:-0.02
+RS_LOOKBACK=20
+FINAL_RS_MIN=0.0
+FINAL_RS_MIN_BY_GROUP=Finance:-4.0,Health:-4.0,Consumer:-2.0,Industrial:-2.0,Energy:-3.0
 
 # Tracker
 TRACKER_ENABLED=true
 TRACKER_MAX_BARS_OPEN=20
+
+# Misc
+REQUIRE_PLAYBOOK=true
+ALERT_ETFS=false
+CORRELATION_GUARD_ENABLED=true
 ```
 
 ---
