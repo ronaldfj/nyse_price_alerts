@@ -35,9 +35,9 @@ class Settings:
 
 
 NUMERIC_COLS = [
-    "price", "target", "stop", "rr", "score", "regime_score", "setup_score", "trigger_score",
-    "atr", "adx", "rsi", "rs20", "extension_pct", "vix", "bars_open", "days_open",
-    "current_price", "pnl_pct", "mfe_pct", "mae_pct", "exit_price",
+    "price", "real_entry", "target", "stop", "rr", "score", "regime_score", "setup_score",
+    "trigger_score", "atr", "adx", "rsi", "rs20", "extension_pct", "vix", "bars_open",
+    "days_open", "current_price", "pnl_pct", "mfe_pct", "mae_pct", "exit_price",
 ]
 
 DATE_COLS = ["timestamp_utc", "last_checked_utc", "closed_utc", "exit_date"]
@@ -80,10 +80,21 @@ def load_history(path: Path) -> pd.DataFrame:
 def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
 
-    out["risk_dollars"] = (out["price"] - out["stop"]).astype(float)
-    out["reward_dollars"] = (out["target"] - out["price"]).astype(float)
+    # FIX (mejora institucional #2): usar real_entry (Open real de la primera barra
+    # posterior a la alerta, capturado por update_alert_history_tracker) como base de
+    # riesgo/realized_r en vez de "price" (cierre de la barra de señal, ya vencido para
+    # cuando la alerta se lee). Filas viejas o aun sin una barra cerrada tras la alerta
+    # no tienen real_entry todavia -> fallback a "price", igual que se comportaba antes.
+    if "real_entry" in out.columns:
+        effective_entry = out["real_entry"].where(out["real_entry"] > 0, out["price"])
+    else:
+        effective_entry = out["price"]
+    out["effective_entry"] = effective_entry
+
+    out["risk_dollars"] = (effective_entry - out["stop"]).astype(float)
+    out["reward_dollars"] = (out["target"] - effective_entry).astype(float)
     out["risk_pct_entry"] = np.where(
-        out["price"] > 0, (out["risk_dollars"] / out["price"]) * 100.0, np.nan
+        effective_entry > 0, (out["risk_dollars"] / effective_entry) * 100.0, np.nan
     )
 
     # Realized exit price fallback hierarchy
@@ -94,13 +105,19 @@ def add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     out["realized_r"] = np.where(
         out["risk_dollars"] > 0,
-        (out["resolved_exit_price"] - out["price"]) / out["risk_dollars"],
+        (out["resolved_exit_price"] - effective_entry) / out["risk_dollars"],
         np.nan,
     )
 
-    # Override realized_r for canonical statuses
-    out.loc[out["status"] == "hit_stop", "realized_r"] = -1.0
-    out.loc[out["status"] == "hit_target", "realized_r"] = out.loc[out["status"] == "hit_target", "rr"]
+    # FIX: se eliminaron los overrides que reemplazaban realized_r por la columna "rr" en
+    # trades hit_target (y por -1.0 fijo en hit_stop, ya redundante). La formula de arriba
+    # ya es exacta para status cerrados: resolved_exit_price iguala a target/stop segun el
+    # caso, asi que recalcularla desde ahi es mas robusto que depender de "rr" (calculado en
+    # un momento distinto, sobre una base de entry potencialmente distinta si el pipeline de
+    # entrada cambia). Ver mismo fix en advanced_analytics.compute_realized_r y
+    # backtest.build_report, que sufrian la misma inconsistencia de forma mas grave (ahi
+    # "price" es el real_entry post-gap, mientras que "rr" se calculaba sobre el entry
+    # teorico previo al gap).
 
     # Categoricals for analysis
     out["score_bucket"] = pd.cut(

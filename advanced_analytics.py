@@ -60,7 +60,7 @@ def load_trades(path: Path) -> pd.DataFrame:
         raise ValueError(f"Archivo vacio: {path}")
 
     # Normalizar columnas numericas
-    num_cols = ["price", "target", "stop", "rr", "score", "pnl_pct",
+    num_cols = ["price", "real_entry", "target", "stop", "rr", "score", "pnl_pct",
                 "mfe_pct", "mae_pct", "exit_price", "bars_open", "days_open",
                 "rs20", "extension_pct", "vol_ratio", "confluence_count"]
     for c in num_cols:
@@ -83,34 +83,55 @@ def load_trades(path: Path) -> pd.DataFrame:
     df = df.dropna(subset=["closed_dt", "price", "stop"])
     df = df.sort_values("closed_dt").reset_index(drop=True)
 
+    # FIX (mejora institucional #2): "effective_entry" = real_entry (Open real de la
+    # primera barra posterior a la señal/alerta) cuando esta disponible, si no "price".
+    # Para backtest_trades.csv ambas columnas ya coinciden (price = real_entry desde el
+    # Fix #1 de simulate_trade); para alerts_history.csv historico (generado antes de
+    # esta mejora) o trades aun sin una barra cerrada, real_entry puede venir vacio/0 —
+    # se cae a "price" en ese caso, igual que se comportaba antes de agregar la columna.
+    if "real_entry" in df.columns:
+        df["effective_entry"] = df["real_entry"].where(df["real_entry"] > 0, df["price"])
+    else:
+        df["effective_entry"] = df["price"]
+
     log.info("Cargados %s trades cerrados desde %s", len(df), path)
     return df
 
 
 # ── Calculos base ──────────────────────────────────────────────────────────
 def compute_realized_r(df: pd.DataFrame) -> pd.Series:
-    """R realizado por trade. Para hit_target usa rr, hit_stop = -1.0,
-    expired = (exit_price - entry) / risk."""
-    risk = df["price"] - df["stop"]
-    realized = pd.Series(np.nan, index=df.index)
-    realized.loc[df["status"] == "hit_target"] = df.loc[df["status"] == "hit_target", "rr"]
-    realized.loc[df["status"] == "hit_stop"]   = -1.0
-    expired_mask = df["status"] == "expired"
-    if expired_mask.any():
-        exit_p = df.loc[expired_mask, "exit_price"].fillna(df.loc[expired_mask, "price"])
-        realized.loc[expired_mask] = (exit_p - df.loc[expired_mask, "price"]) / risk.loc[expired_mask]
-    return realized
+    """R realizado por trade: (exit_price - price) / (price - stop), uniforme
+    para todos los status cerrados (hit_target, hit_stop, expired).
+    # FIX: la version anterior usaba la columna "rr" (RR estructural, calculado sobre el
+    # precio TEORICO de la barra de senal) para trades hit_target, en vez de recalcular
+    # contra "price". En backtest_trades.csv, "price" es el real_entry (Open real de la
+    # barra siguiente tras el fix de look-ahead de simulate_trade), asi que "rr" y "price"
+    # tienen bases distintas: cualquier gap de hasta 2% (el umbral del gap filter) entre el
+    # cierre teorico de la senal y la apertura real se colaba sin corregir en el lado
+    # ganador de la distribucion, contaminando expectancy, Monte Carlo y equity curve.
+    # exit_price ya contiene el precio de salida real (target/stop/cierre por time-stop)
+    # para cualquier status cerrado, asi que una sola formula basta: para hit_stop,
+    # exit_price siempre iguala a stop por construccion, dando -1.0 automaticamente.
+    """
+    entry = df["effective_entry"] if "effective_entry" in df.columns else df["price"]
+    risk = entry - df["stop"]
+    exit_p = df["exit_price"]
+    if "current_price" in df.columns:
+        exit_p = exit_p.fillna(df["current_price"])
+    exit_p = exit_p.fillna(entry)
+    return (exit_p - entry) / (risk + 1e-9)
 
 
 def apply_costs(realized_r: pd.Series, df: pd.DataFrame, settings: Settings) -> pd.Series:
     """Resta comisiones y slippage de cada R realizado.
     Costos expresados en R: cada $ de costo = (costo/risk_per_share)."""
-    risk_per_share = (df["price"] - df["stop"]).abs()
+    entry = df["effective_entry"] if "effective_entry" in df.columns else df["price"]
+    risk_per_share = (entry - df["stop"]).abs()
     # Comision en R = comision / (risk_per_share * shares)
     # Asumimos sizing por % riesgo: shares = (capital * risk%) / risk_per_share
     risk_budget = settings.initial_capital * (settings.risk_per_trade_pct / 100.0)
     shares = (risk_budget / risk_per_share).round()
-    notional = df["price"] * shares
+    notional = entry * shares
 
     commission_dollars = settings.commission_per_trade  # round-trip
     slippage_dollars = notional * (settings.slippage_pct / 100.0) * 2  # entry + exit

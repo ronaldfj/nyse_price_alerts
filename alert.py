@@ -131,6 +131,11 @@ from signals import (
     add_indicators as _signals_add_indicators,
     compute_relative_strength as _signals_compute_rs,
 )
+# FIX (mejora institucional #1): motor de scoring/filtros compartido con backtest.py.
+# Antes, evaluate_stock() (aca) y evaluate_bar() (backtest.py) duplicaban ~250 lineas de
+# logica identica que fue divergiendo silenciosamente iteracion a iteracion — ver
+# scoring.py para el detalle completo de que se desincronizo y por que importa.
+import scoring
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -322,6 +327,46 @@ ETF_RS_FLOOR             = float(os.getenv("ETF_RS_FLOOR", "-3.0"))
 
 # v2.10: Eliminadas env vars PULLBACK_* — sistema es breakout puro
 
+# Parametros del nucleo de scoring compartido (scoring.py) — construidos una sola vez
+# a partir de las mismas constantes de arriba, para que evaluate_stock() y (via
+# backtest.py) evaluate_bar() lean exactamente los mismos umbrales.
+_CORE_PARAMS = scoring.CoreParams(
+    setup_rsi_min=SETUP_RSI_MIN,
+    setup_rsi_max=SETUP_RSI_MAX,
+    breakout_rsi_max=BREAKOUT_RSI_MAX,
+    pullback_max_atr=PULLBACK_MAX_ATR,
+    breakout_max_atr=BREAKOUT_MAX_ATR,
+    weak_adx_block=WEAK_ADX_BLOCK,
+    breakout_rs_min=BREAKOUT_RS_MIN,
+    breakout_near_pct=BREAKOUT_NEAR_PCT,
+    final_rs_min=FINAL_RS_MIN,
+    final_rs_min_by_group=FINAL_RS_MIN_BY_GROUP,
+    vix_block_level=VIX_BLOCK_LEVEL,
+    vix_caution_level=VIX_CAUTION_LEVEL,
+    vix_low_level=VIX_LOW_LEVEL,
+    breakout_atr_gate=BREAKOUT_ATR_GATE,
+    breakout_extended_vol_ratio=BREAKOUT_EXTENDED_VOL_RATIO,
+    breakout_extended_vol_ratio_low_vix=BREAKOUT_EXTENDED_VOL_RATIO_LOW_VIX,
+    slope_consistency_ratio=SLOPE_CONSISTENCY_RATIO,
+    slope_weak_penalty=SLOPE_WEAK_PENALTY,
+    trigger_vol_ratio=TRIGGER_VOL_RATIO,
+    volume_profile_lookback=VOLUME_PROFILE_LOOKBACK,
+    volume_profile_penalty=VOLUME_PROFILE_PENALTY,
+    supertrend_regime_block=SUPERTREND_REGIME_BLOCK,
+    supertrend_block_adx_min=SUPERTREND_BLOCK_ADX_MIN,
+    supertrend_block_rs_neg=SUPERTREND_BLOCK_RS_NEG,
+    confluence_hard_floor=CONFLUENCE_HARD_FLOOR,
+    confluence_soft_floor=CONFLUENCE_SOFT_FLOOR,
+    confluence_low_penalty=CONFLUENCE_LOW_PENALTY,
+    confluence_bonus=CONFLUENCE_BONUS,
+    adaptive_rr_extension_threshold=ADAPTIVE_RR_EXTENSION_THRESHOLD,
+    adaptive_rr_multiplier=ADAPTIVE_RR_MULTIPLIER,
+    min_rr=MIN_RR,
+    etf_rs_floor=ETF_RS_FLOOR,
+    index_etfs=frozenset(INDEX_ETFS),
+    sector_etfs=frozenset(SECTOR_ETFS),
+)
+
 # v2.5 Fix #3: tracking de simbolos donde fallo earnings — para reportarlo al final
 EARNINGS_FAILURES: set[str] = set()
 
@@ -344,6 +389,15 @@ ALERT_HISTORY_COLUMNS = [
     "group",
     "playbook",
     "price",
+    # FIX (mejora institucional #2): real_entry = Open real de la primera barra
+    # posterior a la alerta (analogo al Fix #1 de backtest.py::simulate_trade — "entry
+    # efectivo en signal_bar+1, no Close del dia de senal"). Antes el tracker en vivo
+    # nunca capturaba esto: pnl_pct/mfe_pct/mae_pct se calculaban siempre contra "price"
+    # (el cierre de la barra de señal, ya vencido para cuando la alerta se lee), mientras
+    # que el backtest SI se ancla a un fill realista. Se completa recien cuando el
+    # tracker ve la primera barra cerrada tras la alerta — vacio ("") hasta entonces;
+    # ensure_alert_history_schema() ya migra filas viejas sin esta columna a "".
+    "real_entry",
     "target",
     "stop",
     "rr",
@@ -413,27 +467,50 @@ class StockSignal:
 
     @property
     def should_alert(self) -> bool:
-        playbook_ok = self.signal_type == "breakout" or not REQUIRE_PLAYBOOK  # v2.10: solo breakout
-        # v2.4: ETFs sectoriales siempre alertan; SPY/QQQ solo si ALERT_ETFS=true
-        benchmark_ok = ALERT_ETFS or self.symbol not in INDEX_ETFS
-        # v2.2: RS minima por grupo — Finance/Health tienen threshold mas permisivo
-        rs_min = FINAL_RS_MIN_BY_GROUP.get(self.group, FINAL_RS_MIN)
-        # v2.4: ETFs de indice omiten filtro RS (son el benchmark)
-        # v2.6 Fix #4: sector ETFs requieren RS minimo absoluto (ETF_RS_FLOOR)
-        if self.symbol in INDEX_ETFS:
-            rs_ok = True
-        elif self.symbol in SECTOR_ETFS:
-            rs_ok = self.rs20 >= ETF_RS_FLOOR
-        else:
-            rs_ok = self.rs20 >= rs_min
-        return (
-            self.score >= MIN_SCORE
-            and self.rr >= MIN_RR
-            and not self.blocked
-            and playbook_ok
-            and benchmark_ok
-            and rs_ok
+        # FIX (mejora institucional #1): el gate final ahora vive en scoring.py
+        # (passes_final_filters), compartido con backtest.py — antes backtest.py
+        # reimplementaba una version incompleta inline (sin benchmark_ok/ALERT_ETFS ni
+        # el rs_ok especifico de ETFs), lo que le permitia generar "trades" para SPY/QQQ
+        # que jamas habrian alertado en vivo. Ver scoring.py para el detalle.
+        return scoring.passes_final_filters(
+            symbol=self.symbol,
+            group=self.group,
+            signal_type=self.signal_type,
+            score=self.score,
+            rr=self.rr,
+            blocked=self.blocked,
+            rs20=self.rs20,
+            require_playbook=REQUIRE_PLAYBOOK,
+            min_score=MIN_SCORE,
+            min_rr=MIN_RR,
+            alert_etfs=ALERT_ETFS,
+            final_rs_min=FINAL_RS_MIN,
+            final_rs_min_by_group=FINAL_RS_MIN_BY_GROUP,
+            etf_rs_floor=ETF_RS_FLOOR,
+            index_etfs=frozenset(INDEX_ETFS),
+            sector_etfs=frozenset(SECTOR_ETFS),
         )
+
+
+# FIX: helper de retry con backoff exponencial — antes NINGUNA llamada externa (Telegram,
+# yfinance, earnings) reintentaba, violando el requisito basico de un sistema no supervisado
+# ("cada llamada externa debe tener retry con backoff"). Un timeout transitorio de red tenia
+# el mismo efecto que una falla real: dato perdido, sin segundo intento, hasta la proxima
+# corrida (12h despues). Se centraliza aca para no duplicar el patron en cada funcion.
+def _retry(desc: str, fn, attempts: int = 3, base_delay: float = 1.5):
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as exc:
+            last_exc = exc
+            if attempt == attempts:
+                break
+            wait = base_delay * (2 ** (attempt - 1))
+            log.warning("%s: intento %s/%s fallo (%s) — reintentando en %.1fs", desc, attempt, attempts, exc, wait)
+            time.sleep(wait)
+    log.error("%s: fallo tras %s intentos — %s", desc, attempts, last_exc)
+    return None
 
 
 # ── Telegram ──────────────────────────────────────────────────────────────────
@@ -447,19 +524,25 @@ def send_telegram(msg: str) -> bool:
         return False
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    try:
+
+    # FIX: retry con backoff para errores transitorios (timeout, 429, 5xx). No reintenta
+    # 4xx != 429 (token invalido, chat_id invalido, markdown malformado) porque ahi
+    # reintentar no cambia el resultado — solo demora la deteccion del problema real.
+    def _post() -> bool:
         response = requests.post(
             url,
             json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"},
             timeout=15,
         )
-        if response.status_code != 200:
-            log.warning("Telegram %s: %s", response.status_code, response.text[:120])
-            return False
-        return True
-    except Exception as exc:
-        log.error("Telegram: %s", exc)
+        if response.status_code == 200:
+            return True
+        if response.status_code == 429 or response.status_code >= 500:
+            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
+        log.warning("Telegram %s (no reintentable): %s", response.status_code, response.text[:200])
         return False
+
+    result = _retry("Telegram sendMessage", _post, attempts=3, base_delay=2.0)
+    return bool(result)
 
 
 # ── Estado ────────────────────────────────────────────────────────────────────
@@ -507,7 +590,28 @@ def _fmt_csv_number(value: object, digits: int = 4) -> str:
 
 
 def _normalize_dt_text(ts: datetime) -> str:
-    return ts.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "+00:00")
+    # FIX: se elimino ".replace('+00:00', '+00:00')" al final — reemplazaba un string por si
+    # mismo (no-op), presumiblemente un resto de una edicion anterior. isoformat() ya deja el
+    # sufijo "+00:00" tras astimezone(utc).
+    return ts.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _bar_timestamp_to_utc(idx) -> datetime:
+    """Convierte el indice de una barra diaria de yfinance a datetime UTC real.
+    # FIX: la version anterior, ante un timestamp naive, hacia
+    # `.replace(tzinfo=timezone.utc)` — es decir, ETIQUETABA la fecha/hora tal cual (p.ej.
+    # medianoche del calendario de NYSE) como si YA fuera UTC, en vez de CONVERTIRLA. yfinance
+    # casi siempre devuelve un indice tz-aware (America/New_York) para datos diarios, por lo
+    # que este caso limite rara vez se ejercita en produccion — pero si alguna vez el indice
+    # llega naive (cambio de version de pandas/yfinance, feed alternativo, etc.), el bug
+    # desplazaria trigger_candle_utc hasta 5 horas, pudiendo cambiar la fecha calendario y
+    # romper la deduplicacion por setup_hash (que incluye trigger_candle_utc). Ahora se asume
+    # el timezone real de la bolsa (America/New_York) antes de convertir a UTC.
+    """
+    ts = pd.Timestamp(idx)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("America/New_York")
+    return ts.to_pydatetime()
 
 
 def _price_bucket(value: float) -> str:
@@ -634,6 +738,9 @@ def append_alert_history(sig: StockSignal, vix: Optional[float]) -> None:
         "group": sig.group,
         "playbook": sig.signal_type,
         "price": _fmt_csv_number(sig.price),
+        # Se completa en update_alert_history_tracker() con el Open real de la primera
+        # barra posterior a la alerta — todavia no existe en el momento de alertar.
+        "real_entry": "",
         "target": _fmt_csv_number(sig.tp),
         "stop": _fmt_csv_number(sig.stop),
         "rr": _fmt_csv_number(sig.rr),
@@ -840,6 +947,16 @@ def update_alert_history_tracker() -> dict[str, int]:
             stats["still_open"] += 1
             continue
 
+        # FIX (mejora institucional #2): capturar el fill REAL (Open de la primera barra
+        # cerrada tras la alerta), analogo a simulate_trade()'s Fix #1 en backtest.py.
+        # Se calcula UNA sola vez (trade_df.iloc[0] es siempre la misma barra calendario
+        # en corridas sucesivas, porque el filtro es por opened_date fijo) y se persiste
+        # en el CSV para que corridas futuras no lo recalculen ni lo desplacen.
+        real_entry = _safe_float(row.get("real_entry"))
+        if real_entry <= 0:
+            real_entry = float(trade_df["Open"].iloc[0])
+            row["real_entry"] = _fmt_csv_number(real_entry)
+
         highs = trade_df["High"].astype(float)
         lows = trade_df["Low"].astype(float)
         closes = trade_df["Close"].astype(float)
@@ -847,8 +964,8 @@ def update_alert_history_tracker() -> dict[str, int]:
         bars_open = int(len(trade_df))
         days_open = int((trade_df.index[-1].date() - opened_dt.date()).days)
         current_price = float(closes.iloc[-1])
-        mfe_pct = ((float(highs.max()) - entry) / max(entry, 1e-9)) * 100.0
-        mae_pct = ((float(lows.min()) - entry) / max(entry, 1e-9)) * 100.0
+        mfe_pct = ((float(highs.max()) - real_entry) / max(real_entry, 1e-9)) * 100.0
+        mae_pct = ((float(lows.min()) - real_entry) / max(real_entry, 1e-9)) * 100.0
 
         exit_status = "open"
         exit_price = None
@@ -897,14 +1014,14 @@ def update_alert_history_tracker() -> dict[str, int]:
         row["mae_pct"] = _fmt_csv_number(mae_pct)
 
         if exit_status == "open":
-            row["pnl_pct"] = _fmt_csv_number(((current_price - entry) / max(entry, 1e-9)) * 100.0)
+            row["pnl_pct"] = _fmt_csv_number(((current_price - real_entry) / max(real_entry, 1e-9)) * 100.0)
             row["exit_date"] = ""
             row["exit_price"] = ""
             row["exit_reason"] = ""
             row["closed_utc"] = ""
             stats["still_open"] += 1
         else:
-            realized_pnl_pct = ((float(exit_price) - entry) / max(entry, 1e-9)) * 100.0
+            realized_pnl_pct = ((float(exit_price) - real_entry) / max(real_entry, 1e-9)) * 100.0
             row["pnl_pct"] = _fmt_csv_number(realized_pnl_pct)
             row["exit_date"] = exit_date
             row["exit_price"] = _fmt_csv_number(exit_price)
@@ -982,13 +1099,18 @@ def normalize_caution_adjustment(sym_context: dict) -> tuple[float, str]:
 
 # ── Macro ─────────────────────────────────────────────────────────────────────
 def fetch_vix() -> Optional[float]:
-    try:
+    # FIX: retry con backoff. El VIX es el circuit breaker de panico de mercado
+    # (VIX_BLOCK_LEVEL=30 = bloqueo total); antes un timeout transitorio de yfinance
+    # desactivaba ese hard block para TODA la corrida sin que nadie se enterara mas que
+    # por un log de GitHub Actions que nadie revisa reactivamente. Ver tambien el resumen
+    # de Telegram en main(), que ahora reporta explicitamente si el VIX no estuvo disponible.
+    def _fetch() -> float:
         df = yf.Ticker("^VIX").history(period="5d", interval="1d", auto_adjust=True)
-        if df is not None and not df.empty:
-            return round(float(df["Close"].iloc[-1]), 2)
-    except Exception as exc:
-        log.warning("VIX no disponible: %s", exc)
-    return None
+        if df is None or df.empty:
+            raise RuntimeError("respuesta vacia de yfinance")
+        return round(float(df["Close"].iloc[-1]), 2)
+
+    return _retry("VIX", _fetch, attempts=3, base_delay=1.5)
 
 
 def get_earnings_info(symbol: str) -> tuple[Optional[str], bool]:
@@ -997,54 +1119,71 @@ def get_earnings_info(symbol: str) -> tuple[Optional[str], bool]:
     if symbol in _EARNINGS_CACHE:
         return _EARNINGS_CACHE[symbol]
 
-    try:
-        ticker = yf.Ticker(symbol)
-        earnings_date = None
-
+    # FIX: retry con backoff en la parte de red (antes un timeout/429 transitorio de
+    # yfinance dejaba el simbolo sin filtro de earnings por toda la corrida — riesgo real:
+    # alertar sobre una accion que reporta resultados esa misma semana). Se reintenta solo
+    # la obtencion de datos; distingue "API fallo" (reintentable, cuenta como failure) de
+    # "no hay earnings programados" (respuesta valida, no es una falla).
+    last_exc: Optional[Exception] = None
+    earnings_date = None
+    for attempt in range(1, 4):
         try:
-            earnings_df = ticker.get_earnings_dates(limit=1)
-            if earnings_df is not None and not earnings_df.empty:
-                earnings_date = earnings_df.index[0]
-        except Exception:
-            earnings_df = None
+            ticker = yf.Ticker(symbol)
+            earnings_date = None
 
-        if earnings_date is None:
-            cal = ticker.calendar
-            if isinstance(cal, dict):
-                candidate = cal.get("Earnings Date")
-                if isinstance(candidate, list) and candidate:
-                    earnings_date = candidate[0]
-                elif candidate is not None:
-                    earnings_date = candidate
-            elif isinstance(cal, pd.DataFrame) and not cal.empty and "Earnings Date" in cal.index:
-                earnings_date = cal.loc["Earnings Date"].iloc[0]
+            try:
+                earnings_df = ticker.get_earnings_dates(limit=1)
+                if earnings_df is not None and not earnings_df.empty:
+                    earnings_date = earnings_df.index[0]
+            except Exception:
+                earnings_df = None
 
-        if earnings_date is None:
-            return None, False
+            if earnings_date is None:
+                cal = ticker.calendar
+                if isinstance(cal, dict):
+                    candidate = cal.get("Earnings Date")
+                    if isinstance(candidate, list) and candidate:
+                        earnings_date = candidate[0]
+                    elif candidate is not None:
+                        earnings_date = candidate
+                elif isinstance(cal, pd.DataFrame) and not cal.empty and "Earnings Date" in cal.index:
+                    earnings_date = cal.loc["Earnings Date"].iloc[0]
 
-        if hasattr(earnings_date, "to_pydatetime"):
-            earnings_dt = earnings_date.to_pydatetime()
-        elif isinstance(earnings_date, datetime):
-            earnings_dt = earnings_date
-        else:
-            return str(earnings_date), False
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 3:
+                wait = 1.5 * (2 ** (attempt - 1))
+                log.warning("%s: earnings intento %s/3 fallo (%s) — reintentando en %.1fs", symbol, attempt, exc, wait)
+                time.sleep(wait)
 
-        now = datetime.now(timezone.utc)
-        if earnings_dt.tzinfo is None:
-            earnings_dt = earnings_dt.replace(tzinfo=timezone.utc)
-
-        # Usar total_seconds para evitar truncamiento de .days
-        # Ejemplo: 5 días y 23 horas → .days = 5 (pasa el filtro), total = 5.96 (bloqueado)
-        diff_seconds = abs((earnings_dt - now).total_seconds())
-        days_diff = diff_seconds / 86400.0
-        date_str = earnings_dt.strftime("%Y-%m-%d")
-        return date_str, days_diff <= EARNINGS_BUFFER_DAYS
-
-    except Exception as exc:
+    if last_exc is not None:
         # v2.5 Fix #3: warning visible — operar sin filtro de earnings es riesgoso
-        log.warning("%s: get_earnings_info FALLO — operando SIN filtro de earnings: %s", symbol, exc)
+        log.warning("%s: get_earnings_info FALLO tras reintentos — operando SIN filtro de earnings: %s", symbol, last_exc)
         EARNINGS_FAILURES.add(symbol)
         return None, False
+
+    if earnings_date is None:
+        return None, False
+
+    if hasattr(earnings_date, "to_pydatetime"):
+        earnings_dt = earnings_date.to_pydatetime()
+    elif isinstance(earnings_date, datetime):
+        earnings_dt = earnings_date
+    else:
+        return str(earnings_date), False
+
+    now = datetime.now(timezone.utc)
+    if earnings_dt.tzinfo is None:
+        earnings_dt = earnings_dt.replace(tzinfo=timezone.utc)
+
+    # Usar total_seconds para evitar truncamiento de .days
+    # Ejemplo: 5 días y 23 horas → .days = 5 (pasa el filtro), total = 5.96 (bloqueado)
+    diff_seconds = abs((earnings_dt - now).total_seconds())
+    days_diff = diff_seconds / 86400.0
+    date_str = earnings_dt.strftime("%Y-%m-%d")
+    return date_str, days_diff <= EARNINGS_BUFFER_DAYS
 
 
 def prefetch_earnings_parallel(symbols: list[str], max_workers: int = 10) -> None:
@@ -1090,7 +1229,11 @@ def batch_download(symbols: list[str], period: str = "2y") -> dict[str, pd.DataF
     yf.download() acepta lista de tickers y devuelve DataFrame multi-index."""
     if not symbols:
         return {}
-    try:
+
+    # FIX: retry con backoff — antes un unico fallo (timeout, rate limit) tiraba todo el
+    # batch a descarga individual (40 requests en vez de 1), mucho mas lento y con mayor
+    # probabilidad de rate-limit en cascada. Reintentar el batch primero es mas barato.
+    def _download() -> object:
         # group_by='ticker' para tener df.xs(symbol) accesible
         bulk = yf.download(
             tickers=" ".join(symbols),
@@ -1101,8 +1244,13 @@ def batch_download(symbols: list[str], period: str = "2y") -> dict[str, pd.DataF
             progress=False,
             threads=True,
         )
-    except Exception as exc:
-        log.warning("Batch download fallo: %s — fallback a descarga individual", exc)
+        if bulk is None or bulk.empty:
+            raise RuntimeError("respuesta vacia de yfinance")
+        return bulk
+
+    bulk = _retry("Batch download", _download, attempts=3, base_delay=2.0)
+    if bulk is None:
+        log.warning("Batch download fallo tras reintentos — fallback a descarga individual")
         return {}
 
     result: dict[str, pd.DataFrame] = {}
@@ -1144,10 +1292,17 @@ def fetch_data(symbol: str) -> Optional[pd.DataFrame]:
     if symbol in _DATA_CACHE:
         return _DATA_CACHE[symbol]
 
-    try:
-        df = yf.Ticker(symbol).history(period="2y", interval="1d", auto_adjust=True)
-    except Exception as exc:
-        log.warning("%s: error en descarga — %s", symbol, exc)
+    # FIX: retry con backoff — este es el fallback individual que corre cuando el batch
+    # download no trajo el simbolo; antes tampoco reintentaba, asi que un timeout aqui
+    # eliminaba el simbolo del scan completo para esa corrida sin segunda oportunidad.
+    def _fetch() -> pd.DataFrame:
+        result = yf.Ticker(symbol).history(period="2y", interval="1d", auto_adjust=True)
+        if result is None or result.empty:
+            raise RuntimeError("respuesta vacia de yfinance")
+        return result
+
+    df = _retry(f"{symbol} fetch_data", _fetch, attempts=3, base_delay=1.5)
+    if df is None:
         return None
 
     required = {"High", "Low", "Close", "Volume"}
@@ -1244,60 +1399,35 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
 
     last = df.iloc[-2]
     prev = df.iloc[-3]
-    trigger_candle_utc = _normalize_dt_text(pd.Timestamp(df.index[-2]).to_pydatetime().replace(tzinfo=timezone.utc) if df.index[-2].tzinfo is None else pd.Timestamp(df.index[-2]).to_pydatetime())
+    trigger_candle_utc = _normalize_dt_text(_bar_timestamp_to_utc(df.index[-2]))
 
     name = STOCK_NAMES.get(symbol, symbol)
     group = STOCK_GROUPS.get(symbol, "Other")
-    reasons: list[str] = []
-    warnings: list[str] = []
-    blocked: list[str] = []
-
-    regime_score = 0.0
-    setup_score = 0.0
-    trigger_score = 0.0
-    signal_type = "none"
 
     entry = float(last["Close"])
-    atr = max(float(last["atr"]), entry * 0.008)
-    rsi = float(last["rsi"])
-    prev_rsi = float(prev["rsi"])
-    adx = float(last["adx"])
-    plus_di = float(last["plus_di"])
-    minus_di = float(last["minus_di"])
-    vol_ratio = float(last["vol_ratio"])
-    ema20 = float(last["ema20"])
-    ema50 = float(last["ema50"])
-    ema200 = float(last["ema200"])
-    extension_pct = ((entry - ema200) / max(ema200, 1e-9)) * 100
-    pullback_atr = abs(entry - ema20) / max(atr, 1e-9)
     rs20 = 0.0 if symbol == "SPY" else compute_relative_strength(df, spy_df)
+    recent_vols = df["Volume"].iloc[-(VOLUME_PROFILE_LOOKBACK + 1):-1].values
 
-    prior_high_5 = float(last["prior_high_5"]) if pd.notna(last["prior_high_5"]) else entry
-    prior_high_20 = float(last["prior_high_20"]) if pd.notna(last["prior_high_20"]) else entry + 2.0 * atr
-    prior_low_5 = float(last["prior_low_5"]) if pd.notna(last["prior_low_5"]) else entry - 1.2 * atr
-    prior_swing_low = float(last["prior_low_12"]) if pd.notna(last["prior_low_12"]) else entry - 1.8 * atr
-    prior_low_20 = float(last["prior_low_20"]) if pd.notna(last["prior_low_20"]) else prior_swing_low
+    # FIX (mejora institucional #1): todo el bloque de scoring tecnico (regime/setup/
+    # trigger/confluencia/playbook/stop-tp-rr) vivia duplicado aca y en
+    # backtest.py::evaluate_bar, y habia divergido silenciosamente con el tiempo (ver
+    # scoring.py). Ahora ambos llaman al mismo nucleo — este archivo solo aporta lo que
+    # es genuinamente exclusivo de la operacion en vivo: earnings, gap intraday,
+    # contexto manual y sizing/telegram.
+    base_score_adjustment, context_note = normalize_caution_adjustment(sym_context)
+    core = scoring.evaluate_core(
+        symbol, group, last, prev, rs20, vix, recent_vols, _CORE_PARAMS,
+        base_score_adjustment=base_score_adjustment,
+        breadth_pct=breadth_pct,
+    )
 
-    # Supertrend
-    st_trend_last = int(last["st_trend"]) if pd.notna(last.get("st_trend")) else 0
-    st_trend_prev = int(prev["st_trend"]) if pd.notna(prev.get("st_trend")) else 0
-    st_value_last = float(last["st_value"]) if pd.notna(last.get("st_value")) else 0.0
-    supertrend_bull = st_trend_last == 1
-    supertrend_cross_up = (st_trend_prev == -1) and (st_trend_last == 1)   # cruce alcista reciente
+    blocked: list[str] = []
+    warnings: list[str] = list(core.warnings)
+    reasons: list[str] = list(core.reasons)
 
+    # ── Filtros exclusivamente en vivo (sin equivalente historico limpio) ──
     if earnings_near and earnings_date_str:
         blocked.append(f"Earnings en {earnings_date_str} (±{EARNINGS_BUFFER_DAYS} días)")
-
-    if vix is not None and vix >= VIX_BLOCK_LEVEL:
-        blocked.append(f"VIX={vix:.1f} — mercado en pánico")
-
-    # v2.5 #6: breadth filter — si <BREADTH_BLOCK_BELOW% del SP500 sobre EMA200, hard block
-    if breadth_pct is not None:
-        if breadth_pct < BREADTH_BLOCK_BELOW:
-            blocked.append(f"Breadth pobre ({breadth_pct:.1f}% < {BREADTH_BLOCK_BELOW}%) — mercado debil")
-        elif breadth_pct < BREADTH_MIN_PCT:
-            warnings.append(f"Breadth limitada ({breadth_pct:.1f}% < {BREADTH_MIN_PCT}%)")
-            setup_score -= 0.3
 
     # v2.5 #8: gap filter — si gap intraday >GAP_BLOCK_PCT, el setup tecnico es invalido
     gap_pct, gap_blocked = detect_overnight_gap(df)
@@ -1307,386 +1437,46 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     if sym_context.get("hard_block_long"):
         blocked.append(f"Bloqueo manual: {sym_context.get('note', 'sin nota')}")
 
-    # v2.6 Fix #2/#3: Supertrend bajista — hard block mas restrictivo
-    # Antes: solo bloqueaba con ADX>=20 (XLP paso con ADX=18.7)
-    # Ahora: bloquea con ADX>=15 O cuando RS es negativa (sin importar ADX)
-    if SUPERTREND_REGIME_BLOCK and not supertrend_bull:
-        if adx >= SUPERTREND_BLOCK_ADX_MIN:
-            blocked.append(
-                f"Supertrend bajista (ST={st_value_last:.2f}, ADX={adx:.1f} >= {SUPERTREND_BLOCK_ADX_MIN}) — sin sesgo alcista"
-            )
-        elif SUPERTREND_BLOCK_RS_NEG and rs20 < 0:
-            blocked.append(
-                f"Supertrend bajista (ST={st_value_last:.2f}) + RS negativa ({rs20:+.2f}%) — sector en lag"
-            )
+    blocked.extend(core.blocked)
 
-    # v2.0: deflacion cuadratica por extension sobre EMA200
-    if extension_pct > 30:
-        blocked.append(f"Precio sobreextendido: {extension_pct:.1f}% sobre EMA200")
-    elif extension_pct > 20:
-        # penalty cuadratica: sube de -0.45 a -1.10 entre 20% y 30%
-        ext_penalty = 0.45 * ((extension_pct - 20) / 10.0) ** 2 + 0.45
-        setup_score -= round(ext_penalty, 2)
-        warnings.append(f"Extension alta: {extension_pct:.1f}% sobre EMA200 (penalty={ext_penalty:.2f})")
-
-    if rsi > 80:
-        blocked.append(f"RSI extremo ({rsi:.1f})")
-    elif rsi > BREAKOUT_RSI_MAX:
-        setup_score -= 0.5
-        warnings.append(f"RSI caliente ({rsi:.1f})")
-
-    # Bloqueo ADX: dos casos independientes para swing diario.
-    # Caso 1: tendencia muy débil sin importar dirección — no es operable.
-    # Caso 2: DI- domina con fuerza suficiente — tendencia bajista confirmada.
-    if adx < WEAK_ADX_BLOCK:
-        blocked.append(
-            f"Tendencia sin fuerza suficiente (ADX={adx:.1f} < {WEAK_ADX_BLOCK:.0f})"
-        )
-    elif plus_di <= minus_di and adx >= 18:
-        blocked.append(
-            f"Dirección bajista (DI+={plus_di:.1f} <= DI-={minus_di:.1f}, ADX={adx:.1f})"
-        )
-
-    if entry > ema200:
-        regime_score += 1.0
-        reasons.append("Precio > EMA200")
-
-    if ema50 > ema200:
-        regime_score += 0.75
-        reasons.append("EMA50 > EMA200")
-
-    slope5 = float(last["ema200_slope_5"])
-    slope3 = float(last["ema200_slope_3"]) if "ema200_slope_3" in last.index else slope5
-    if slope5 > 0:
-        # v2.0: slope consistency cap — si la pendiente corta no confirma la larga, penalizar
-        if slope3 > 0 and slope5 >= slope3 * SLOPE_CONSISTENCY_RATIO:
-            regime_score += 0.75
-            reasons.append("EMA200 con pendiente positiva consistente")
-        else:
-            regime_score += 0.75 - SLOPE_WEAK_PENALTY
-            warnings.append(f"EMA200 slope inconsistente (slope5={slope5:.2f} vs slope3={slope3:.2f})")
-    else:
-        regime_score -= 0.2
-        warnings.append("EMA200 sin pendiente positiva")
-
-    # Supertrend — confirmacion / penalizacion de regimen
-    if supertrend_cross_up:
-        regime_score += 1.2
-        reasons.append(f"Supertrend: cruce alcista reciente (ST={st_value_last:.2f})")
-    elif supertrend_bull:
-        regime_score += 0.6
-        reasons.append(f"Supertrend alcista (ST={st_value_last:.2f})")
-    else:
-        regime_score -= 0.5
-        warnings.append(f"Supertrend bajista (ST={st_value_last:.2f})")
-
-    # v2.1: trend quality score continuo — ratio DI+ pondera el bonus de direccionalidad
-    di_total = plus_di + minus_di + 1e-9
-    trend_quality = plus_di / di_total  # 0.5 = empate, >0.5 = alcista
-    if plus_di > minus_di and adx >= 18:
-        quality_bonus = round(1.0 * trend_quality * 2, 2)  # max 1.0 cuando DI+ domina totalmente
-        regime_score += quality_bonus
-        reasons.append(f"Direccionalidad valida (ADX {adx:.1f}, quality={trend_quality:.2f})")
-    elif plus_di > minus_di and adx >= WEAK_ADX_BLOCK:
-        regime_score += 0.4 * trend_quality * 2
-        warnings.append(f"Direccionalidad todavia debil (ADX {adx:.1f})")
-    elif adx >= 18:
-        regime_score -= 0.4
-        warnings.append(f"DI sin liderazgo claro (DI+ {plus_di:.1f} vs DI- {minus_di:.1f})")
-
-    if 0.15 <= pullback_atr <= PULLBACK_MAX_ATR:
-        setup_score += 0.8
-        reasons.append(f"Distancia operable a EMA20 ({pullback_atr:.2f} ATR)")
-    elif pullback_atr < 0.15:
-        setup_score += 0.2
-        reasons.append("Precio muy cerca de EMA20")
-    elif pullback_atr <= BREAKOUT_MAX_ATR:
-        setup_score -= 0.15
-        warnings.append(f"Lejos de EMA20 para pullback ({pullback_atr:.2f} ATR)")
-    else:
-        setup_score -= 0.45
-        warnings.append(f"Muy extendido vs EMA20 ({pullback_atr:.2f} ATR)")
-
-    if SETUP_RSI_MIN <= rsi <= SETUP_RSI_MAX and rsi >= prev_rsi:
-        setup_score += 1.0
-        reasons.append(f"RSI en zona ideal ({rsi:.1f})")
-    elif SETUP_RSI_MAX < rsi <= BREAKOUT_RSI_MAX and adx >= 20:
-        setup_score += 0.45
-        reasons.append(f"RSI fuerte de tendencia ({rsi:.1f})")
-    elif 40 <= rsi < SETUP_RSI_MIN and rsi > prev_rsi:
-        setup_score += 0.35
-        reasons.append(f"RSI recuperando ({rsi:.1f})")
-    else:
-        setup_score -= 0.5
-        warnings.append(f"RSI fuera de zona ideal ({rsi:.1f})")
-
-    if ema20 > ema50 and float(last["ema20_slope_3"]) > 0:
-        setup_score += 0.8
-        reasons.append("EMA20 > EMA50 con pendiente positiva")
-    elif entry > ema50:
-        setup_score += 0.4
-        reasons.append("Precio sostiene EMA50")
-    else:
-        setup_score -= 0.2
-        warnings.append("Precio por debajo de EMA50")
-
-    if symbol not in INDEX_ETFS and symbol not in SECTOR_ETFS:
-        # v2.2/v2.4: RS discount para grupos con lag estructural; ETFs sectoriales omiten comparacion
-        rs_group_discount = 0.5 if group in FINAL_RS_MIN_BY_GROUP else 1.0
-        if rs20 > 1.0:
-            setup_score += 0.9
-            reasons.append(f"RS positiva vs SPY: {rs20:+.2f}%")
-        elif rs20 > 0:
-            setup_score += 0.4
-            reasons.append(f"RS levemente positiva vs SPY: {rs20:+.2f}%")
-        elif rs20 > -1.0:
-            setup_score -= 0.2 * rs_group_discount
-            warnings.append(f"RS plana vs SPY: {rs20:+.2f}% (grupo={group})")
-        else:
-            setup_score -= 0.7 * rs_group_discount
-            warnings.append(f"RS negativa vs SPY: {rs20:+.2f}% (grupo={group}, threshold={FINAL_RS_MIN_BY_GROUP.get(group, FINAL_RS_MIN):.1f}%)")
-
-    broke_prior_high_5 = entry > prior_high_5
-    broke_prior_high_20 = entry > prior_high_20
-    near_breakout = entry >= prior_high_20 * BREAKOUT_NEAR_PCT
-    bullish_reclaim = entry > ema20 and float(prev["Close"]) <= float(prev["ema20"])
-    positive_momentum = float(last["macd_hist"]) > float(prev["macd_hist"])
-
-    if broke_prior_high_5:
-        trigger_score += 0.8
-        reasons.append("Ruptura de máximo reciente")
-    elif bullish_reclaim:
-        trigger_score += 0.5
-        reasons.append("Reclaim sobre EMA20")
-    elif near_breakout:
-        trigger_score += 0.35
-        reasons.append("Cerca de ruptura del máximo de 20 sesiones")
-
-    # Supertrend cruce alcista también suma como trigger (señal de entrada limpia)
-    if supertrend_cross_up:
-        trigger_score += 0.6
-        reasons.append("Supertrend: flip alcista = entrada de tendencia")
-
-    if positive_momentum and float(last["macd_hist"]) > 0:
-        trigger_score += 0.8
-        reasons.append("MACD histograma acelerando > 0")
-    elif positive_momentum:
-        trigger_score += 0.4
-        reasons.append("MACD mejorando")
-
-    if vol_ratio >= TRIGGER_VOL_RATIO:
-        trigger_score += 0.8
-        reasons.append(f"Volumen de confirmacion ({vol_ratio:.2f}x)")
-    elif vol_ratio >= 0.95:
-        trigger_score += 0.15
-        reasons.append(f"Volumen aceptable ({vol_ratio:.2f}x)")
-    else:
-        trigger_score -= 0.4
-        warnings.append(f"Volumen flojo ({vol_ratio:.2f}x)")
-
-    # v2.0/v2.2: Breakout ATR Gate con vol gate dinamico segun VIX
-    # VIX bajo (< VIX_LOW_LEVEL) relaja el requisito de volumen estructuralmente
-    effective_vol_gate = (
-        BREAKOUT_EXTENDED_VOL_RATIO_LOW_VIX
-        if (vix is not None and vix < VIX_LOW_LEVEL)
-        else BREAKOUT_EXTENDED_VOL_RATIO
-    )
-    if pullback_atr > BREAKOUT_ATR_GATE and vol_ratio < effective_vol_gate:
-        trigger_score -= 0.7
-        warnings.append(
-            f"Breakout extendido sin vol suficiente ({pullback_atr:.2f} ATR, "
-            f"vol={vol_ratio:.2f}x < {effective_vol_gate:.1f}x requerido, VIX={vix})"
-        )
-        # v2.11: Setup penalty adicional para el bucket 2.0-2.5 ATR + vol insuficiente.
-        # Backtest n=56: WR=35.7%, exp=+0.070R vs global +0.251R.
-        # Con confluence=3: n=34, WR=29.4%, exp=-0.274R — expectancy negativa confirmada.
-        # El penalty de trigger (-0.70) no era suficiente para bajar el score por debajo de MIN_SCORE.
-        if 2.0 <= pullback_atr < 2.5:
-            setup_score -= 0.5
-            warnings.append(
-                f"Setup penalty: zona de bajo edge (ext={pullback_atr:.2f} ATR, vol insuficiente)"
-            )
-
-    # v2.1: Volume profile filter — 3 velas de volumen decreciente = posible distribucion
-    if len(df) >= VOLUME_PROFILE_LOOKBACK + 2:
-        recent_vols = df["Volume"].iloc[-(VOLUME_PROFILE_LOOKBACK + 1):-1].values
-        vol_decreasing = all(recent_vols[i] > recent_vols[i + 1] for i in range(len(recent_vols) - 1))
-        if vol_decreasing:
-            trigger_score -= VOLUME_PROFILE_PENALTY
-            warnings.append(
-                f"Volumen decreciente ultimas {VOLUME_PROFILE_LOOKBACK} velas — posible distribucion"
-            )
-
-    pullback_trend_strong = entry > ema200 and ema50 > ema200 and ema20 > ema50 and adx >= 18
-    breakout_structure = (
-        broke_prior_high_20
-        or near_breakout
-        or (
-            broke_prior_high_5
-            and positive_momentum
-            and trigger_score >= 1.6
-            and entry >= prior_high_20 * 0.985
-        )
-    )
-
-    # v2.10: solo breakout — pullback eliminado por backtest (expectancy 0.009R)
-    is_breakout = (
-        breakout_structure
-        and vol_ratio >= 0.95
-        and rs20 >= BREAKOUT_RS_MIN
-        and adx >= 18
-        and rsi <= BREAKOUT_RSI_MAX
-        and pullback_atr <= BREAKOUT_MAX_ATR
-        and entry > ema50
-    )
-
-    if is_breakout:
-        signal_type = "breakout"
-        trigger_score += 1.2
-        reasons.append("Playbook: Breakout Expansion")
-
-    if signal_type == "none":
-        setup_score -= 0.7
-        warnings.append("No encaja como breakout")
-
-    score_adjustment, context_note = normalize_caution_adjustment(sym_context)
-    if vix is not None and VIX_CAUTION_LEVEL <= vix < VIX_BLOCK_LEVEL:
-        score_adjustment -= 0.5
-        reasons.append(f"VIX elevado ({vix:.1f})")
-
-    # v2.1/v2.3: Confluence scoring calibrado por backtest
-    # confluence=4 -> 68.4% WR, 0.997R | confluence=5 -> 0% WR, -0.543R (sobreextension)
-    confluence_signals = [
-        broke_prior_high_5,
-        bullish_reclaim,
-        supertrend_cross_up,
-        positive_momentum and float(last["macd_hist"]) > 0,
-        vol_ratio >= TRIGGER_VOL_RATIO,
-    ]
-    confluence_count = sum(bool(s) for s in confluence_signals)
-    # v2.6 Fix #1: confluence floor — XLP paso con confluence=1, eso no debe ocurrir
-    # Backtest: confluence 0-1 da WR 24-25% vs confluence 4 que da WR 68%
-    if confluence_count < CONFLUENCE_HARD_FLOOR:
-        blocked.append(
-            f"Confluencia insuficiente ({confluence_count}/5 < {CONFLUENCE_HARD_FLOOR} requerido) — "
-            f"sin catalizadores de entrada"
-        )
-    elif confluence_count < CONFLUENCE_SOFT_FLOOR:
-        score_adjustment -= CONFLUENCE_LOW_PENALTY
-        warnings.append(
-            f"Confluencia baja ({confluence_count}/5 senales) — penalty {CONFLUENCE_LOW_PENALTY}"
-        )
-    elif confluence_count == 4:
-        score_adjustment += CONFLUENCE_BONUS
-        reasons.append(f"Confluencia optima (4/5 senales) +{CONFLUENCE_BONUS}")
-    elif confluence_count == 5:
-        # v2.3: backtest muestra 0% WR en confluence=5 — sobreextension / chasing
-        score_adjustment -= 0.6
-        warnings.append("Confluencia maxima (5/5) — posible chasing, penalizacion aplicada")
-    elif confluence_count >= CONFLUENCE_THRESHOLD:
-        score_adjustment += CONFLUENCE_BONUS * 0.5
-        reasons.append(f"Confluencia parcial ({confluence_count}/5 senales) +{CONFLUENCE_BONUS*0.5:.1f}")
-
-    total_score = round(regime_score + setup_score + trigger_score + score_adjustment, 2)
-    if score_adjustment != 0:
-        reasons.append(f"Ajuste macro/manual: {score_adjustment:+.2f}")
+    if core.score_adjustment != 0:
+        reasons.append(f"Ajuste macro/manual: {core.score_adjustment:+.2f}")
     if context_note:
         reasons.append(f"Contexto: {context_note}")
 
-    # v2.10: pullback hardening eliminado (no hay pullback)
-    range_20 = max(prior_high_20 - prior_low_20, 1.2 * atr)
-    measured_move = max(0.75 * range_20, 1.6 * atr)
-
-    if signal_type == "breakout":
-        # Stop debajo del prior_high_5 (ahora soporte) con buffer ATR.
-        # Floor en entry - 1.5*atr para evitar stops demasiado ajustados
-        # que casi garantizan ser tocados en la volatilidad normal del día.
-        raw_stop = max(prior_high_5 - 0.30 * atr, ema20 - 0.35 * atr)
-        conservative_floor = entry - 1.50 * atr
-        stop = min(raw_stop, conservative_floor)
-        # Garantizar que el stop esté al menos 0.25 ATR debajo del entry
-        stop = min(stop, entry - 0.25 * atr)
-        risk = entry - stop
-        tp = max(
-            prior_high_20 + 0.20 * atr,
-            entry + measured_move,
-            entry + 1.25 * risk,
-        )
-
-    else:
-        raw_stop = min(prior_swing_low - 0.10 * atr, ema50 - 0.15 * atr, entry - 0.90 * atr)
-        stop = min(raw_stop, entry - 0.15 * atr)
-        risk = entry - stop
-        tp = max(entry + 1.00 * atr, prior_high_20)
-
-    min_risk = max(0.22 * atr, entry * 0.002)
-    if risk < min_risk:
-        stop = entry - min_risk
-        risk = min_risk
-
-    if stop >= entry:
-        blocked.append("Riesgo inválido: stop no consistente")
-        stop = entry - max(0.90 * atr, entry * 0.003)
-        risk = entry - stop
-
-    if tp <= entry:
-        blocked.append("Target inválido: TP no consistente")
-        tp = entry + max(1.20 * atr, 0.60 * range_20)
-
-    rr = (tp - entry) / max(risk, 1e-9)
-
-    # v2.1: Adaptive MIN_RR — setups extendidos deben justificar mas margen
-    effective_min_rr = MIN_RR
-    if extension_pct > ADAPTIVE_RR_EXTENSION_THRESHOLD:
-        effective_min_rr = round(MIN_RR * ADAPTIVE_RR_MULTIPLIER, 2)
-        if rr < effective_min_rr:
-            warnings.append(
-                f"RR insuficiente para setup extendido ({rr:.2f} < {effective_min_rr:.2f} requerido)"
-            )
-            # No bloquea, pero se refleja en should_alert via rr vs MIN_RR adaptativo
-            # almacenar en signal_type para que should_alert pueda inspeccionarlo
-    # Guardamos el effective_min_rr como atributo temporal en el objeto
-    # (lo comparamos en should_alert via el campo blocked si falla)
-    if rr < effective_min_rr and not any("extendido" in b for b in blocked):
-        if extension_pct > ADAPTIVE_RR_EXTENSION_THRESHOLD:
-            blocked.append(
-                f"Adaptive RR insuficiente: {rr:.2f} < {effective_min_rr:.2f} "
-                f"(extension={extension_pct:.1f}% > {ADAPTIVE_RR_EXTENSION_THRESHOLD}%)"
-            )
-
     # v2.5: position sizing + trailing stop sugerido + ranking score
-    shares, pos_usd, risk_usd = compute_position_size(entry, stop, signal_type)
-    trailing_initial = compute_trailing_stop_initial(entry, atr, ema20)
+    shares, pos_usd, risk_usd = compute_position_size(entry, core.stop, core.signal_type)
+    trailing_initial = compute_trailing_stop_initial(entry, core.atr, float(last["ema20"]))
     # ranking: score ponderado por confluence + RS positiva (boost)
-    rank = total_score * (1 + confluence_count * 0.15) * (1 + max(rs20, 0) / 20)
+    rank = core.total_score * (1 + core.confluence_count * 0.15) * (1 + max(rs20, 0) / 20)
 
     return StockSignal(
         symbol=symbol,
         name=name,
         price=entry,
-        score=total_score,
-        rr=round(rr, 2),
-        tp=round(tp, 2),
-        stop=round(stop, 2),
-        atr=round(atr, 2),
+        score=core.total_score,
+        rr=round(core.rr, 2),
+        tp=round(core.tp, 2),
+        stop=round(core.stop, 2),
+        atr=round(core.atr, 2),
         trigger_candle_utc=trigger_candle_utc,
-        rsi=round(rsi, 2),
-        adx=round(adx, 2),
+        rsi=round(core.rsi, 2),
+        adx=round(core.adx, 2),
         group=group,
         earnings_date=earnings_date_str or "",
-        regime_score=round(regime_score, 2),
-        setup_score=round(setup_score, 2),
-        trigger_score=round(trigger_score, 2),
-        extension_pct=round(extension_pct, 2),
+        regime_score=core.regime_score,
+        setup_score=core.setup_score,
+        trigger_score=core.trigger_score,
+        extension_pct=round(core.extension_pct, 2),
         rs20=round(rs20, 2),
-        signal_type=signal_type,
-        supertrend_bull=supertrend_bull,
-        supertrend_val=round(st_value_last, 2),
+        signal_type=core.signal_type,
+        supertrend_bull=core.supertrend_bull,
+        supertrend_val=round(core.supertrend_val, 2),
         reasons=reasons,
         warnings=warnings,
         blocked=blocked,
         # v2.5 nuevos campos
-        confluence_count=confluence_count,
+        confluence_count=core.confluence_count,
         position_size_shares=shares,
         position_size_usd=pos_usd,
         risk_usd=risk_usd,
@@ -1863,6 +1653,7 @@ def main() -> None:
     # ========================================================================
     # FASE 2: Rankear candidatos + correlation guard + emitir alertas
     # ========================================================================
+    telegram_failures: list[str] = []
     if candidates:
         # v2.5 #9: rankear por rank_score descendente
         candidates.sort(key=lambda s: s.rank_score, reverse=True)
@@ -1883,19 +1674,39 @@ def main() -> None:
             sectors_used.add(sig.group)
 
         # Emitir alertas finales
+        # FIX: antes, append_alert_history() y el cooldown (state[symbol]=now) SOLO se
+        # ejecutaban si send_telegram() devolvia True. Eso acopla el audit trail y el
+        # anti-duplicado a la disponibilidad de una API externa sin retry propio a este
+        # nivel: si Telegram fallaba (rate limit, markdown roto por un "note" manual en
+        # market_context_stocks.json, etc.), la señal se perdia para siempre sin quedar
+        # registrada, Y ademas podia volver a evaluarse y re-intentar alertar en la
+        # siguiente corrida porque nunca se persistio ni se seteo el cooldown. Ahora la
+        # persistencia (historico + cooldown) es incondicional; el envio a Telegram es
+        # best-effort (ya con retry, ver send_telegram) y su fallo solo se refleja en
+        # logs/stats/resumen, sin comprometer el registro de auditoria del trade.
         for sig in approved:
-            if send_telegram(format_alert(sig, vix)):
-                if not DRY_RUN:
-                    append_alert_history(sig, vix)
-                    history_rows = load_alert_history_rows()
-                    state[sig.symbol] = now
-                    save_state(state)
-                stats["alerts"] += 1
-                log.info(
-                    "✅ ALERTA %s | score=%.1f | rank=%.2f | confluence=%s/5 | RR=%.2f | playbook=%s | RS20=%+.2f%%",
-                    sig.symbol, sig.score, sig.rank_score, sig.confluence_count,
-                    sig.rr, sig.signal_type, sig.rs20,
+            delivered = send_telegram(format_alert(sig, vix))
+            if not delivered:
+                telegram_failures.append(sig.symbol)
+                log.error(
+                    "Telegram NO entrego la alerta de %s tras reintentos — se persiste "
+                    "igual en el historico para no perder el registro ni el cooldown",
+                    sig.symbol,
                 )
+
+            if not DRY_RUN:
+                append_alert_history(sig, vix)
+                history_rows = load_alert_history_rows()
+                state[sig.symbol] = now
+                save_state(state)
+
+            stats["alerts"] += 1
+            log.info(
+                "%s ALERTA %s | score=%.1f | rank=%.2f | confluence=%s/5 | RR=%.2f | playbook=%s | RS20=%+.2f%%",
+                "✅" if delivered else "⚠️ (no entregada a Telegram)",
+                sig.symbol, sig.score, sig.rank_score, sig.confluence_count,
+                sig.rr, sig.signal_type, sig.rs20,
+            )
 
     # v2.5 Fix #3: reportar simbolos donde fallo earnings
     if EARNINGS_FAILURES:
@@ -1912,8 +1723,21 @@ def main() -> None:
     )
 
     if not DRY_RUN:
-        vix_summary = f"📉 VIX: {vix:.1f}\n" if vix is not None else ""
+        # FIX: antes, VIX no disponible / fallas de earnings / entregas fallidas de
+        # Telegram solo quedaban en el log de GitHub Actions (que nadie revisa
+        # reactivamente). Un fallo de VIX en particular desactiva silenciosamente el
+        # circuit breaker de panico de mercado para toda la corrida — ahora se hace
+        # visible en el mismo resumen que el operador SI lee (Telegram).
+        vix_summary = f"📉 VIX: {vix:.1f}\n" if vix is not None else "⚠️ VIX NO DISPONIBLE — hard block de panico desactivado esta corrida\n"
         breadth_summary = f"🌐 Breadth: {breadth_pct:.1f}%\n" if breadth_pct is not None else ""
+        earnings_summary = (
+            f"⚠️ Earnings no disponibles ({len(EARNINGS_FAILURES)}): {', '.join(sorted(EARNINGS_FAILURES))}\n"
+            if EARNINGS_FAILURES else ""
+        )
+        telegram_fail_summary = (
+            f"⚠️ Alertas NO entregadas a Telegram ({len(telegram_failures)}): {', '.join(telegram_failures)}\n"
+            if telegram_failures else ""
+        )
         send_telegram(
             f"📋 *Resumen escaneo bolsa v2.6*\n\n"
             f"{vix_summary}"
@@ -1924,7 +1748,9 @@ def main() -> None:
             f"○ Sin senal: {stats['no_signal']}\n"
             f"⚠️ Bloqueadas: {stats['blocked']}\n"
             f"💤 En cooldown: {stats['cooldown']}\n"
-            f"❌ Sin datos: {stats['no_data']}"
+            f"❌ Sin datos: {stats['no_data']}\n"
+            f"{earnings_summary}"
+            f"{telegram_fail_summary}"
         )
 
 

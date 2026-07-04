@@ -47,6 +47,23 @@ from signals import (
     add_indicators as _signals_add_indicators,
     compute_relative_strength as _signals_compute_rs,
 )
+# FIX: universo importado desde alert.py — antes backtest.py mantenia su propia copia de
+# STOCK_NAMES/STOCK_GROUPS (16 simbolos, ultima vez sincronizada ~v2.2), que incluia TSLA y
+# PG (excluidos del universo en vivo desde v2.5 por mal desempeno: avg_R=-0.086/-0.166) y le
+# faltaban 24+ simbolos que SI corren en produccion (AMD, CRM, NOW, ORCL, ANET, GS, AXP, LLY,
+# ABT, ISRG, NKE, MCD, todo Industrial/Energy, y los 6 ETFs sectoriales). Correr
+# `python backtest.py` sin --symbols validaba una lista que no tiene nada que ver con lo que
+# el bot realmente escanea dos veces al dia — es decir, ~60% del universo en vivo nunca paso
+# por el backtest, y dos simbolos deliberadamente excluidos seguian contaminando las metricas
+# agregadas. Importar desde alert.py garantiza que ambos usen el mismo universo por
+# construccion (mismo principio de fuente unica que signals.py aplica a los indicadores).
+# Se suman INDEX_ETFS/SECTOR_ETFS por la misma razon: son datos de clasificacion del
+# universo (no parametros de estrategia), asi que tambien deben tener una unica fuente.
+from alert import STOCK_NAMES, STOCK_GROUPS, INDEX_ETFS, SECTOR_ETFS
+# FIX (mejora institucional #1): motor de scoring compartido con alert.py — ver scoring.py
+# para el detalle de que reglas nunca habian llegado a este archivo (confluence floors,
+# bloqueo Supertrend+RS negativa, ETF RS floor, gate de ALERT_ETFS).
+import scoring
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -59,34 +76,8 @@ logging.basicConfig(
 log = logging.getLogger("backtest")
 
 # ---------------------------------------------------------------------------
-# Universo (sincronizado con alert.py)
+# Universo — importado desde alert.py (ver FIX arriba, junto al import de signals.py)
 # ---------------------------------------------------------------------------
-STOCK_NAMES: dict[str, str] = {
-    "AAPL": "Apple Inc.",
-    "MSFT": "Microsoft Corp.",
-    "NVDA": "NVIDIA Corp.",
-    "AMZN": "Amazon.com Inc.",
-    "GOOGL": "Alphabet Inc.",
-    "META": "Meta Platforms",
-    "TSLA": "Tesla, Inc.",
-    "BRK-B": "Berkshire Hathaway",
-    "V": "Visa Inc.",
-    "JPM": "JPMorgan Chase",
-    "UNH": "UnitedHealth Group",
-    "MA": "Mastercard Inc.",
-    "AVGO": "Broadcom Inc.",
-    "HD": "Home Depot Inc.",
-    "PG": "Procter & Gamble",
-    "COST": "Costco Wholesale",
-}
-
-STOCK_GROUPS: dict[str, str] = {
-    "AAPL": "Tech", "MSFT": "Tech", "NVDA": "Tech", "AMZN": "Tech",
-    "GOOGL": "Tech", "META": "Tech", "AVGO": "Tech",
-    "TSLA": "Consumer", "HD": "Consumer", "PG": "Consumer", "COST": "Consumer",
-    "JPM": "Finance", "V": "Finance", "MA": "Finance", "BRK-B": "Finance",
-    "UNH": "Health",
-}
 
 # ---------------------------------------------------------------------------
 # Parametros (sobreescribibles via env o args)
@@ -122,7 +113,10 @@ ADAPTIVE_RR_MULTIPLIER      = float(os.getenv("ADAPTIVE_RR_MULTIPLIER", "1.25"))
 VOLUME_PROFILE_LOOKBACK     = int(os.getenv("VOLUME_PROFILE_LOOKBACK", "3"))
 VOLUME_PROFILE_PENALTY      = float(os.getenv("VOLUME_PROFILE_PENALTY", "0.5"))
 # v2.1
-CONFLUENCE_THRESHOLD = int(os.getenv("CONFLUENCE_THRESHOLD", "3"))
+# FIX: se elimino CONFLUENCE_THRESHOLD — el umbral de bonus ahora es siempre "exactamente
+# 4" (hardcodeado en scoring.py, igual que en alert.py) en vez de un umbral configurable;
+# ese ">= threshold" generico es exactamente el codigo muerto que se documenta en
+# scoring.py (con threshold=4 y los casos 4/5 exactos ya resueltos, nunca se alcanzaba).
 CONFLUENCE_BONUS     = float(os.getenv("CONFLUENCE_BONUS", "0.5"))
 # v2.2
 FINAL_RS_MIN_BY_GROUP_RAW = os.getenv("FINAL_RS_MIN_BY_GROUP", "Finance:-4.0,Health:-4.0,Consumer:-2.0")
@@ -135,6 +129,17 @@ for _e in FINAL_RS_MIN_BY_GROUP_RAW.split(","):
         except ValueError:
             pass
 
+# FIX (mejora institucional #1): parametros v2.6 que backtest.py nunca leia — el
+# scoring compartido (scoring.py) los necesita para aplicar exactamente las mismas
+# reglas que alert.py. Mismos nombres/defaults que alert.py.
+CONFLUENCE_HARD_FLOOR    = int(os.getenv("CONFLUENCE_HARD_FLOOR", "2"))
+CONFLUENCE_SOFT_FLOOR    = int(os.getenv("CONFLUENCE_SOFT_FLOOR", "3"))
+CONFLUENCE_LOW_PENALTY   = float(os.getenv("CONFLUENCE_LOW_PENALTY", "0.5"))
+SUPERTREND_BLOCK_ADX_MIN = float(os.getenv("SUPERTREND_BLOCK_ADX_MIN", "15.0"))
+SUPERTREND_BLOCK_RS_NEG  = os.getenv("SUPERTREND_BLOCK_RS_NEG", "true").lower() == "true"
+ETF_RS_FLOOR             = float(os.getenv("ETF_RS_FLOOR", "-3.0"))
+ALERT_ETFS               = os.getenv("ALERT_ETFS", "false").lower() == "true"
+
 # Backtest-especifico
 # v2.7: Pullback Hardening (Backtest Fase B mostro pullback degradandose)
 # v2.10: pullback eliminado del sistema
@@ -143,13 +148,51 @@ COOLDOWN_BARS       = int(os.getenv("BT_COOLDOWN_BARS", "5"))   # barras entre s
 MAX_BARS_HOLD       = int(os.getenv("BT_MAX_BARS_HOLD", "15"))  # time-stop
 REQUIRE_PLAYBOOK    = True
 
+# Parametros del nucleo de scoring compartido — ver alert.py::_CORE_PARAMS (misma idea).
+_CORE_PARAMS = scoring.CoreParams(
+    setup_rsi_min=SETUP_RSI_MIN,
+    setup_rsi_max=SETUP_RSI_MAX,
+    breakout_rsi_max=BREAKOUT_RSI_MAX,
+    pullback_max_atr=PULLBACK_MAX_ATR,
+    breakout_max_atr=BREAKOUT_MAX_ATR,
+    weak_adx_block=WEAK_ADX_BLOCK,
+    breakout_rs_min=BREAKOUT_RS_MIN,
+    breakout_near_pct=BREAKOUT_NEAR_PCT,
+    final_rs_min=FINAL_RS_MIN,
+    final_rs_min_by_group=FINAL_RS_MIN_BY_GROUP,
+    vix_block_level=VIX_BLOCK_LEVEL,
+    vix_caution_level=VIX_CAUTION_LEVEL,
+    vix_low_level=VIX_LOW_LEVEL,
+    breakout_atr_gate=BREAKOUT_ATR_GATE,
+    breakout_extended_vol_ratio=BREAKOUT_EXTENDED_VOL_RATIO,
+    breakout_extended_vol_ratio_low_vix=BREAKOUT_EXT_VOL_LOW_VIX,
+    slope_consistency_ratio=SLOPE_CONSISTENCY_RATIO,
+    slope_weak_penalty=SLOPE_WEAK_PENALTY,
+    trigger_vol_ratio=TRIGGER_VOL_RATIO,
+    volume_profile_lookback=VOLUME_PROFILE_LOOKBACK,
+    volume_profile_penalty=VOLUME_PROFILE_PENALTY,
+    supertrend_regime_block=SUPERTREND_BLOCK,
+    supertrend_block_adx_min=SUPERTREND_BLOCK_ADX_MIN,
+    supertrend_block_rs_neg=SUPERTREND_BLOCK_RS_NEG,
+    confluence_hard_floor=CONFLUENCE_HARD_FLOOR,
+    confluence_soft_floor=CONFLUENCE_SOFT_FLOOR,
+    confluence_low_penalty=CONFLUENCE_LOW_PENALTY,
+    confluence_bonus=CONFLUENCE_BONUS,
+    adaptive_rr_extension_threshold=ADAPTIVE_RR_EXT_THRESHOLD,
+    adaptive_rr_multiplier=ADAPTIVE_RR_MULTIPLIER,
+    min_rr=MIN_RR,
+    etf_rs_floor=ETF_RS_FLOOR,
+    index_etfs=frozenset(INDEX_ETFS),
+    sector_etfs=frozenset(SECTOR_ETFS),
+)
+
 # ---------------------------------------------------------------------------
 # Schema CSV de salida (compatible con alerts_history.csv)
 # ---------------------------------------------------------------------------
 TRADE_COLUMNS = [
     "timestamp_utc", "trigger_candle_utc", "setup_key", "setup_hash",
     "symbol", "name", "group", "playbook",
-    "price", "target", "stop", "rr", "score",
+    "price", "real_entry", "target", "stop", "rr", "score",
     "regime_score", "setup_score", "trigger_score",
     "atr", "adx", "rsi", "rs20", "extension_pct",
     "reasons", "warnings", "blocked",
@@ -231,6 +274,13 @@ def evaluate_bar(
     Retorna un dict con la señal o None si no hay señal.
     i >= 3 siempre (necesitamos last=i-1, prev=i-2 para ser consistentes
     con alert.py que usa iloc[-2] y iloc[-3] sobre el df completo).
+
+    FIX (mejora institucional #1): delega el scoring tecnico a scoring.py, el mismo
+    nucleo que usa alert.py en vivo. Antes esta funcion reimplementaba ~250 lineas de
+    logica que habia divergido: sin confluence hard/soft floor (v2.6), sin el bloqueo
+    Supertrend+RS negativa (v2.6 Fix #3), aplicando descuento de RS a ETFs sectoriales
+    que alert.py exime, y con ADX>=20 hardcodeado para el bloqueo Supertrend en vez del
+    SUPERTREND_BLOCK_ADX_MIN configurable. Ver scoring.py para el detalle completo.
     """
     if i < 220:
         return None
@@ -242,315 +292,36 @@ def evaluate_bar(
     name   = STOCK_NAMES.get(symbol, symbol)
     rs20   = compute_rs(df["Close"], spy_closes, i)
 
-    entry      = float(last["Close"])
-    atr        = max(float(last["atr"]), entry * 0.008)
-    rsi        = float(last["rsi"])
-    prev_rsi   = float(prev["rsi"])
-    adx        = float(last["adx"])
-    plus_di    = float(last["plus_di"])
-    minus_di   = float(last["minus_di"])
-    vol_ratio  = float(last["vol_ratio"])
-    ema20      = float(last["ema20"])
-    ema50      = float(last["ema50"])
-    ema200     = float(last["ema200"])
-    extension_pct = ((entry - ema200) / max(ema200, 1e-9)) * 100
-    pullback_atr  = abs(entry - ema20) / max(atr, 1e-9)
-
-    prior_high_5   = float(last["prior_high_5"])  if pd.notna(last["prior_high_5"])  else entry
-    prior_high_20  = float(last["prior_high_20"]) if pd.notna(last["prior_high_20"]) else entry + 2*atr
-    prior_low_5    = float(last["prior_low_5"])   if pd.notna(last["prior_low_5"])   else entry - 1.2*atr
-    prior_swing_low= float(last["prior_low_12"])  if pd.notna(last["prior_low_12"])  else entry - 1.8*atr
-    prior_low_20   = float(last["prior_low_20"])  if pd.notna(last["prior_low_20"])  else prior_swing_low
-
-    st_trend_last  = int(last["st_trend"])  if pd.notna(last.get("st_trend"))  else 0
-    st_trend_prev  = int(prev["st_trend"])  if pd.notna(prev.get("st_trend"))  else 0
-    st_value_last  = float(last["st_value"]) if pd.notna(last.get("st_value")) else 0.0
-    supertrend_bull     = st_trend_last == 1
-    supertrend_cross_up = (st_trend_prev == -1) and (st_trend_last == 1)
-
-    reasons:  list[str] = []
-    warnings: list[str] = []
-    blocked:  list[str] = []
-
-    # ── Hard blocks ────────────────────────────────────────────────────────
-    if vix_proxy >= VIX_BLOCK_LEVEL:
-        blocked.append(f"VIX={vix_proxy:.1f} — mercado en panico")
-
-    if SUPERTREND_BLOCK and not supertrend_bull and adx >= 20:
-        blocked.append(f"Supertrend bajista (ST={st_value_last:.2f}, ADX={adx:.1f})")
-
-    if extension_pct > 30:
-        blocked.append(f"Precio sobreextendido: {extension_pct:.1f}% sobre EMA200")
-
-    if rsi > 80:
-        blocked.append(f"RSI extremo ({rsi:.1f})")
-
-    if adx < WEAK_ADX_BLOCK:
-        blocked.append(f"ADX={adx:.1f} < {WEAK_ADX_BLOCK:.0f}")
-    elif plus_di <= minus_di and adx >= 18:
-        blocked.append(f"Direccion bajista DI+={plus_di:.1f} <= DI-={minus_di:.1f}")
-
-    # ── Regime score ───────────────────────────────────────────────────────
-    regime_score = 0.0
-
-    if entry > ema200:
-        regime_score += 1.0
-        reasons.append("Precio > EMA200")
-    if ema50 > ema200:
-        regime_score += 0.75
-        reasons.append("EMA50 > EMA200")
-
-    slope5 = float(last["ema200_slope_5"])
-    slope3 = float(last["ema200_slope_3"]) if "ema200_slope_3" in last.index else slope5
-    if slope5 > 0:
-        if slope3 > 0 and slope5 >= slope3 * SLOPE_CONSISTENCY_RATIO:
-            regime_score += 0.75
-            reasons.append("EMA200 slope consistente")
-        else:
-            regime_score += 0.75 - SLOPE_WEAK_PENALTY
-            warnings.append(f"EMA200 slope inconsistente ({slope5:.2f} vs {slope3:.2f})")
-    else:
-        regime_score -= 0.2
-        warnings.append("EMA200 sin pendiente positiva")
-
-    if supertrend_cross_up:
-        regime_score += 1.2
-        reasons.append("Supertrend cruce alcista")
-    elif supertrend_bull:
-        regime_score += 0.6
-        reasons.append("Supertrend alcista")
-    else:
-        regime_score -= 0.5
-        warnings.append("Supertrend bajista")
-
-    di_total = plus_di + minus_di + 1e-9
-    trend_quality = plus_di / di_total
-    if plus_di > minus_di and adx >= 18:
-        regime_score += round(1.0 * trend_quality * 2, 2)
-        reasons.append(f"Direccionalidad ADX={adx:.1f} quality={trend_quality:.2f}")
-    elif plus_di > minus_di and adx >= WEAK_ADX_BLOCK:
-        regime_score += 0.4 * trend_quality * 2
-        warnings.append(f"Direccionalidad debil ADX={adx:.1f}")
-    elif adx >= 18:
-        regime_score -= 0.4
-        warnings.append(f"DI sin liderazgo DI+={plus_di:.1f} DI-={minus_di:.1f}")
-
-    # ── Setup score ────────────────────────────────────────────────────────
-    setup_score = 0.0
-
-    # v2.0: deflacion cuadratica
-    if extension_pct > 20:
-        ext_penalty = 0.45 * ((extension_pct - 20) / 10.0) ** 2 + 0.45
-        setup_score -= round(ext_penalty, 2)
-        warnings.append(f"Extension {extension_pct:.1f}% (penalty={ext_penalty:.2f})")
-
-    if rsi > BREAKOUT_RSI_MAX:
-        setup_score -= 0.5
-        warnings.append(f"RSI caliente ({rsi:.1f})")
-
-    if 0.15 <= pullback_atr <= PULLBACK_MAX_ATR:
-        setup_score += 0.8
-    elif pullback_atr < 0.15:
-        setup_score += 0.2
-    elif pullback_atr <= BREAKOUT_MAX_ATR:
-        setup_score -= 0.15
-        warnings.append(f"Lejos de EMA20 ({pullback_atr:.2f} ATR)")
-    else:
-        setup_score -= 0.45
-        warnings.append(f"Muy extendido EMA20 ({pullback_atr:.2f} ATR)")
-
-    if SETUP_RSI_MIN <= rsi <= SETUP_RSI_MAX and rsi >= prev_rsi:
-        setup_score += 1.0
-        reasons.append(f"RSI zona ideal ({rsi:.1f})")
-    elif SETUP_RSI_MAX < rsi <= BREAKOUT_RSI_MAX and adx >= 20:
-        setup_score += 0.45
-    elif 40 <= rsi < SETUP_RSI_MIN and rsi > prev_rsi:
-        setup_score += 0.35
-    else:
-        setup_score -= 0.5
-        warnings.append(f"RSI fuera de zona ({rsi:.1f})")
-
-    if ema20 > ema50 and float(last["ema20_slope_3"]) > 0:
-        setup_score += 0.8
-        reasons.append("EMA20 > EMA50 con pendiente")
-    elif entry > ema50:
-        setup_score += 0.4
-    else:
-        setup_score -= 0.2
-        warnings.append("Precio bajo EMA50")
-
-    # v2.2: RS con group discount
-    rs_group_discount = 0.5 if group in FINAL_RS_MIN_BY_GROUP else 1.0
-    if symbol != "SPY":
-        if rs20 > 1.0:
-            setup_score += 0.9
-            reasons.append(f"RS positiva {rs20:+.2f}%")
-        elif rs20 > 0:
-            setup_score += 0.4
-        elif rs20 > -1.0:
-            setup_score -= 0.2 * rs_group_discount
-            warnings.append(f"RS plana {rs20:+.2f}% (grupo={group})")
-        else:
-            setup_score -= 0.7 * rs_group_discount
-            warnings.append(f"RS negativa {rs20:+.2f}% (grupo={group})")
-
-    # ── Trigger score ──────────────────────────────────────────────────────
-    trigger_score = 0.0
-
-    broke_prior_high_5  = entry > prior_high_5
-    broke_prior_high_20 = entry > prior_high_20
-    near_breakout       = entry >= prior_high_20 * BREAKOUT_NEAR_PCT
-    bullish_reclaim     = entry > ema20 and float(prev["Close"]) <= float(prev["ema20"])
-    positive_momentum   = float(last["macd_hist"]) > float(prev["macd_hist"])
-
-    if broke_prior_high_5:
-        trigger_score += 0.8
-        reasons.append("Ruptura high reciente")
-    elif bullish_reclaim:
-        trigger_score += 0.5
-        reasons.append("Reclaim EMA20")
-    elif near_breakout:
-        trigger_score += 0.35
-
-    if supertrend_cross_up:
-        trigger_score += 0.6
-        reasons.append("Supertrend flip alcista")
-
-    if positive_momentum and float(last["macd_hist"]) > 0:
-        trigger_score += 0.8
-        reasons.append("MACD hist acelerando >0")
-    elif positive_momentum:
-        trigger_score += 0.4
-
-    if vol_ratio >= TRIGGER_VOL_RATIO:
-        trigger_score += 0.8
-        reasons.append(f"Vol confirmacion {vol_ratio:.2f}x")
-    elif vol_ratio >= 0.95:
-        trigger_score += 0.15
-    else:
-        trigger_score -= 0.4
-        warnings.append(f"Vol flojo {vol_ratio:.2f}x")
-
-    # v2.0: breakout ATR gate con vol dinamico
-    effective_vol_gate = (
-        BREAKOUT_EXT_VOL_LOW_VIX if vix_proxy < VIX_LOW_LEVEL else BREAKOUT_EXTENDED_VOL_RATIO
+    # FIX: el slice original era iloc[i-LOOKBACK-1 : i-1], que EXCLUYE la barra de señal
+    # (last = df.iloc[i-1]) del chequeo de "volumen decreciente" — mira solo las 3 barras
+    # ESTRICTAMENTE anteriores a la señal. alert.py en cambio usa
+    # df["Volume"].iloc[-(LOOKBACK+1):-1] sobre el df con la barra de hoy (en formacion)
+    # al final, lo que equivale a incluir la barra de señal como la MAS RECIENTE de las 3
+    # revisadas. Detectado recien al unificar ambos motores en scoring.py: con el slice
+    # viejo, un mismo bar podia dar confluence/trigger_score distinto en vivo vs backtest
+    # (hasta 0.5 puntos de score) sin que nada lo senalara. Alineado a la semantica de
+    # alert.py (fuente de verdad en produccion): incluye la barra de señal.
+    recent_vols = (
+        df["Volume"].iloc[i - VOLUME_PROFILE_LOOKBACK: i].values
+        if i >= VOLUME_PROFILE_LOOKBACK else np.array([])
     )
-    if pullback_atr > BREAKOUT_ATR_GATE and vol_ratio < effective_vol_gate:
-        trigger_score -= 0.7
-        warnings.append(f"Breakout extendido sin vol ({pullback_atr:.2f} ATR, {vol_ratio:.2f}x)")
-        # v2.11: penalty adicional en setup_score para bucket 2.0-2.5 ATR (exp=-0.274R, n=34)
-        if 2.0 <= pullback_atr < 2.5:
-            setup_score -= 0.5
 
-    # v2.1: volume profile — 3 velas decrecientes
-    if i >= VOLUME_PROFILE_LOOKBACK + 2:
-        recent_vols = df["Volume"].iloc[i - VOLUME_PROFILE_LOOKBACK - 1: i - 1].values
-        vol_decreasing = all(recent_vols[j] > recent_vols[j+1] for j in range(len(recent_vols)-1))
-        if vol_decreasing:
-            trigger_score -= VOLUME_PROFILE_PENALTY
-            warnings.append("Vol decreciente 3 velas")
-
-    # ── Playbook detection ─────────────────────────────────────────────────
-    signal_type = "none"
-    pullback_trend_strong = entry > ema200 and ema50 > ema200 and ema20 > ema50 and adx >= 18
-    breakout_structure = (
-        broke_prior_high_20
-        or near_breakout
-        or (broke_prior_high_5 and positive_momentum and trigger_score >= 1.6
-            and entry >= prior_high_20 * 0.985)
+    core = scoring.evaluate_core(
+        symbol, group, last, prev, rs20, vix_proxy, recent_vols, _CORE_PARAMS,
     )
-    # v2.10: solo breakout (pullback eliminado por backtest 0.009R)
-    is_breakout = (
-        breakout_structure and vol_ratio >= 0.95 and rs20 >= BREAKOUT_RS_MIN
-        and adx >= 18 and rsi <= BREAKOUT_RSI_MAX
-        and pullback_atr <= BREAKOUT_MAX_ATR and entry > ema50
+
+    # ── Filtros finales (mismo gate que alert.py::StockSignal.should_alert) ────────
+    if core.blocked:
+        return None
+    passes = scoring.passes_final_filters(
+        symbol=symbol, group=group, signal_type=core.signal_type,
+        score=core.total_score, rr=core.rr, blocked=core.blocked, rs20=rs20,
+        require_playbook=REQUIRE_PLAYBOOK, min_score=MIN_SCORE, min_rr=MIN_RR,
+        alert_etfs=ALERT_ETFS, final_rs_min=FINAL_RS_MIN,
+        final_rs_min_by_group=FINAL_RS_MIN_BY_GROUP, etf_rs_floor=ETF_RS_FLOOR,
+        index_etfs=frozenset(INDEX_ETFS), sector_etfs=frozenset(SECTOR_ETFS),
     )
-    if is_breakout:
-        signal_type = "breakout"
-        trigger_score += 1.2
-        reasons.append("Playbook: Breakout Expansion")
-
-    if signal_type == "none":
-        setup_score -= 0.7
-        warnings.append("Sin breakout valido")
-
-    # ── VIX caution ────────────────────────────────────────────────────────
-    score_adjustment = 0.0
-    if VIX_CAUTION_LEVEL <= vix_proxy < VIX_BLOCK_LEVEL:
-        score_adjustment -= 0.5
-
-    # v2.1: confluence bonus
-    confluence_signals = [
-        broke_prior_high_5,
-        bullish_reclaim,
-        supertrend_cross_up,
-        positive_momentum and float(last["macd_hist"]) > 0,
-        vol_ratio >= TRIGGER_VOL_RATIO,
-    ]
-    confluence_count = sum(bool(s) for s in confluence_signals)
-    if confluence_count >= CONFLUENCE_THRESHOLD:
-        score_adjustment += CONFLUENCE_BONUS
-
-    total_score = round(regime_score + setup_score + trigger_score + score_adjustment, 2)
-
-    # ── R:R estructural ────────────────────────────────────────────────────
-    range_20     = max(prior_high_20 - prior_low_20, 1.2 * atr)
-    measured_move = max(0.75 * range_20, 1.6 * atr)
-
-    if signal_type == "breakout":
-        raw_stop = max(prior_high_5 - 0.30 * atr, ema20 - 0.35 * atr)
-        stop = min(raw_stop, entry - 1.50 * atr, entry - 0.25 * atr)
-        risk = entry - stop
-        tp   = max(prior_high_20 + 0.20 * atr, entry + measured_move, entry + 1.25 * risk)
-    elif signal_type == "hybrid":
-        raw_stop = max(prior_low_5 - 0.20 * atr, ema20 - 0.45 * atr, entry - 1.05 * atr)
-        stop = min(raw_stop, entry - 0.15 * atr)
-        risk = entry - stop
-        tp   = max(prior_high_20 + 0.15 * atr, entry + max(0.60 * range_20, 1.5 * atr), entry + 1.20 * risk)
-    elif signal_type == "pullback":
-        raw_stop = min(prior_swing_low - 0.12 * atr, ema50 - 0.12 * atr, entry - 0.80 * atr)
-        stop = min(raw_stop, entry - 0.15 * atr)
-        risk = entry - stop
-        tp   = max(prior_high_20 + 0.10 * atr, entry + max(0.55 * range_20, 1.3 * atr), entry + 1.15 * risk)
-    else:
-        raw_stop = min(prior_swing_low - 0.10 * atr, ema50 - 0.15 * atr, entry - 0.90 * atr)
-        stop = min(raw_stop, entry - 0.15 * atr)
-        risk = entry - stop
-        tp   = max(entry + 1.00 * atr, prior_high_20)
-
-    min_risk = max(0.22 * atr, entry * 0.002)
-    if risk < min_risk:
-        stop = entry - min_risk
-        risk = min_risk
-
-    if stop >= entry:
-        blocked.append("Stop invalido")
-        stop = entry - max(0.90 * atr, entry * 0.003)
-        risk = entry - stop
-    if tp <= entry:
-        blocked.append("TP invalido")
-        tp = entry + max(1.20 * atr, 0.60 * range_20)
-
-    rr = (tp - entry) / max(risk, 1e-9)
-
-    # v2.0: adaptive MIN_RR
-    effective_min_rr = MIN_RR
-    if extension_pct > ADAPTIVE_RR_EXT_THRESHOLD:
-        effective_min_rr = round(MIN_RR * ADAPTIVE_RR_MULTIPLIER, 2)
-    if rr < effective_min_rr and extension_pct > ADAPTIVE_RR_EXT_THRESHOLD:
-        blocked.append(f"Adaptive RR {rr:.2f} < {effective_min_rr:.2f}")
-
-    # ── Filtros finales ────────────────────────────────────────────────────
-    if blocked:
-        return None
-    if total_score < MIN_SCORE:
-        return None
-    if rr < MIN_RR:
-        return None
-    if REQUIRE_PLAYBOOK and signal_type != "breakout":
-        return None
-    rs_min = FINAL_RS_MIN_BY_GROUP.get(group, FINAL_RS_MIN)
-    if rs20 < rs_min:
+    if not passes:
         return None
 
     # ── Construir registro ─────────────────────────────────────────────────
@@ -559,7 +330,7 @@ def evaluate_bar(
         trigger_dt = trigger_dt.tz_localize("UTC")
     trigger_str = trigger_dt.isoformat()
 
-    setup_key  = f"{symbol}|{signal_type}|{trigger_str}|{entry:.2f}|{tp:.2f}|{stop:.2f}"
+    setup_key  = f"{symbol}|{core.signal_type}|{trigger_str}|{core.entry:.2f}|{core.tp:.2f}|{core.stop:.2f}"
     setup_hash = hashlib.sha256(setup_key.encode()).hexdigest()
 
     return {
@@ -568,29 +339,29 @@ def evaluate_bar(
         "symbol":          symbol,
         "name":            name,
         "group":           group,
-        "playbook":        signal_type,
-        "entry":           entry,
-        "target":          round(tp, 2),
-        "stop":            round(stop, 2),
-        "rr":              round(rr, 2),
-        "score":           total_score,
-        "regime_score":    round(regime_score, 2),
-        "setup_score":     round(setup_score, 2),
-        "trigger_score":   round(trigger_score, 2),
-        "atr":             round(atr, 2),
-        "adx":             round(adx, 2),
-        "rsi":             round(rsi, 2),
+        "playbook":        core.signal_type,
+        "entry":           core.entry,
+        "target":          round(core.tp, 2),
+        "stop":             round(core.stop, 2),
+        "rr":              round(core.rr, 2),
+        "score":           core.total_score,
+        "regime_score":    core.regime_score,
+        "setup_score":     core.setup_score,
+        "trigger_score":   core.trigger_score,
+        "atr":             round(core.atr, 2),
+        "adx":             round(core.adx, 2),
+        "rsi":             round(core.rsi, 2),
         "rs20":            rs20,
-        "extension_pct":   round(extension_pct, 2),
-        "vol_ratio":       round(vol_ratio, 2),
-        "pullback_atr":    round(pullback_atr, 2),
-        "trend_quality":   round(trend_quality, 2),
-        "confluence_count": confluence_count,
+        "extension_pct":   round(core.extension_pct, 2),
+        "vol_ratio":       round(float(last["vol_ratio"]), 2),
+        "pullback_atr":    round(core.pullback_atr, 2),
+        "trend_quality":   core.trend_quality,
+        "confluence_count": core.confluence_count,
         "vix_proxy":       vix_proxy,
         "setup_key":       setup_key,
         "setup_hash":      setup_hash,
-        "reasons":         " | ".join(reasons[:8]),
-        "warnings":        " | ".join(warnings[:4]),
+        "reasons":         " | ".join(core.reasons[:8]),
+        "warnings":        " | ".join(core.warnings[:4]),
     }
 
 
@@ -625,8 +396,10 @@ def simulate_trade(df: pd.DataFrame, signal_bar: int, entry: float, target: floa
 
     # Precio de entrada REAL (Open del dia siguiente, no Close del dia de senal)
     real_entry = float(df["Open"].iloc[entry_bar])
-    # Recalcular riesgo con el precio real (gap puede cambiarlo)
-    real_risk_per_share = real_entry - stop
+    # FIX: se elimino "real_risk_per_share = real_entry - stop", que se calculaba aqui y
+    # nunca se usaba (variable muerta). El riesgo real se recalcula donde corresponde —
+    # build_report() y main(), a partir de las columnas price/stop/exit_price ya escritas
+    # en el CSV — en vez de duplicar el calculo sin conectarlo al resto del pipeline.
 
     bars_open = 0
     mfe = 0.0   # max favorable excursion %
@@ -758,6 +531,12 @@ def backtest_symbol(
             "group":             sig["group"],
             "playbook":          sig["playbook"],
             "price":             _fmt(outcome.get("real_entry", sig["entry"])),  # v2.9: precio real de entrada
+            # FIX (mejora institucional #2): columna espejo de alerts_history.csv, que
+            # ahora tambien registra real_entry (Open real de la barra siguiente a la
+            # señal) por separado de "price". Aca coinciden por construccion porque
+            # "price" YA es el real_entry desde el Fix #1 de v2.9 — se duplica solo para
+            # que ambos CSV compartan schema, tal como exige CLAUDE.md.
+            "real_entry":        _fmt(outcome.get("real_entry", sig["entry"])),
             "target":            _fmt(sig["target"]),
             "stop":              _fmt(sig["stop"]),
             "rr":                _fmt(sig["rr"]),
@@ -846,11 +625,17 @@ def build_report(df: pd.DataFrame, outdir: Path, input_years: int) -> str:
     # Calcular realized_r
     df = df.copy()
     df["risk_dollars"]  = pd.to_numeric(df["price"], errors="coerce") - pd.to_numeric(df["stop"], errors="coerce")
-    df["realized_r"]    = np.where(
-        df["status"] == "hit_target", pd.to_numeric(df["rr"], errors="coerce"),
-        np.where(df["status"] == "hit_stop", -1.0,
+    # FIX: la version anterior usaba "rr" (RR estructural, calculado sobre el cierre TEORICO
+    # de la barra de senal) para trades hit_target. Pero "price" en este CSV es el real_entry
+    # (Open real de la barra siguiente — ver Fix #1 de simulate_trade), asi que "rr" y "price"
+    # tenian bases distintas: un gap de hasta 2% (el umbral del gap filter) entre el cierre
+    # teorico y la apertura real se colaba sin corregir en el lado ganador de la distribucion,
+    # inflando/desinflando arbitrariamente expectancy, Monte Carlo y equity curve. exit_price
+    # ya contiene el precio de salida real para cualquier status, asi que una sola formula
+    # basta: para hit_stop, exit_price siempre iguala a stop, dando -1.0 automaticamente.
+    df["realized_r"] = (
         (pd.to_numeric(df["exit_price"], errors="coerce") - pd.to_numeric(df["price"], errors="coerce"))
-        / (df["risk_dollars"] + 1e-9))
+        / (df["risk_dollars"] + 1e-9)
     )
 
     n         = len(df)
@@ -1015,10 +800,17 @@ def main() -> None:
     print(f"Símbolos procesados : {trades_df['symbol'].nunique()}")
     print(f"Trades totales      : {n}")
     print(f"Win rate            : {wins/n*100:.1f}% ({wins}W / {stops}S / {expired}E)")
-    realized_r = np.where(
-        trades_df["status"] == "hit_target", pd.to_numeric(trades_df["rr"], errors="coerce"),
-        np.where(trades_df["status"] == "hit_stop", -1.0, 0.0)
+    # FIX: este resumen de consola usaba una TERCERA formula distinta a la de build_report()
+    # (aqui trataba "expired" como 0.0R fijo, ignorando el pnl real de esas posiciones) y a
+    # la de advanced_analytics.compute_realized_r. Unificadas las tres para que reporten el
+    # mismo numero sobre el mismo dataset: (exit_price - price) / (price - stop).
+    risk_dollars_summary = (
+        pd.to_numeric(trades_df["price"], errors="coerce") - pd.to_numeric(trades_df["stop"], errors="coerce")
     )
+    realized_r = (
+        (pd.to_numeric(trades_df["exit_price"], errors="coerce") - pd.to_numeric(trades_df["price"], errors="coerce"))
+        / (risk_dollars_summary + 1e-9)
+    ).to_numpy()
     print(f"Avg Realized R      : {np.nanmean(realized_r):.3f}R")
     print(f"Expectancy          : {np.nanmean(realized_r):.3f}R/trade")
     print(f"\nSalidas en: {outdir}/")
