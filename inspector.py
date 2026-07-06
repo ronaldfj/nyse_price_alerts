@@ -432,6 +432,81 @@ def _render_history_view() -> None:
 
     st.divider()
 
+    # ── Puntualidad de entrada ───────────────────────────────────────────────
+    st.markdown("### ¿Las alertas entran a tiempo?")
+    st.caption(
+        "MFE/MAE (ya registrados por el tracker) son el mejor y el peor precio alcanzado después de "
+        "la alerta, medidos en múltiplos de riesgo (R). Sirven como proxy de timing: una entrada puntual "
+        "debería moverse a favor con poco \"dolor\" (MAE) antes de resolver. Ojo: no sabemos en qué barra "
+        "ocurrió cada extremo dentro del trade, solo el valor alcanzado — es una lectura aproximada, no exacta."
+    )
+
+    tim = df_closed.dropna(subset=["mfe_pct", "mae_pct", "risk_dollars"]).copy()
+    tim = tim[tim["risk_dollars"] > 0]
+
+    if tim.empty:
+        st.caption("Sin datos de MFE/MAE todavía para medir puntualidad.")
+    else:
+        tim["mfe_r"] = (tim["mfe_pct"] / 100.0 * tim["effective_entry"]) / tim["risk_dollars"]
+        tim["mae_r"] = (tim["mae_pct"] / 100.0 * tim["effective_entry"]) / tim["risk_dollars"]
+
+        winners = tim[tim["status"] == "hit_target"]
+        losers = tim[tim["status"] == "hit_stop"]
+
+        heat_winners = float(winners["mae_r"].mean()) if not winners.empty else float("nan")
+        bounce_losers = float(losers["mfe_r"].mean()) if not losers.empty else float("nan")
+        capture_eff = float((winners["realized_r"] / winners["mfe_r"]).mean()) if not winners.empty else float("nan")
+
+        t1, t2, t3 = st.columns(3)
+        t1.metric(
+            "Heat en ganadores", f"{heat_winners:+.2f}R" if pd.notna(heat_winners) else "N/D",
+            help="Adverse excursion promedio (peor drawdown) que tuvieron que aguantar los trades que "
+                 "terminaron en target, antes de resolver a favor. Cerca de 0R = entrada limpia, se movió "
+                 "a favor casi de inmediato. Cerca de -1R = estuvo al borde del stop antes de dar vuelta — "
+                 "señal de timing marginal (entrada temprana).",
+        )
+        t2.metric(
+            "Rebote en perdedores", f"{bounce_losers:+.2f}R" if pd.notna(bounce_losers) else "N/D",
+            help="Favorable excursion promedio que alcanzaron los trades que terminaron en stop, antes de "
+                 "fallar. Si es alto, hubo algo de continuación a favor antes de fallar (no fue un error de "
+                 "dirección total). Cerca de 0R = fueron directo al stop sin ningún avance previo.",
+        )
+        t3.metric(
+            "Eficiencia de captura", f"{capture_eff * 100:.0f}%" if pd.notna(capture_eff) else "N/D",
+            help="Entre los trades ganadores, qué % del mejor movimiento a favor (MFE) terminó cobrando "
+                 "el sistema al cerrar en el target. Bajo = el target queda corto frente a lo que el "
+                 "movimiento realmente daba.",
+        )
+
+        scatter = alt.Chart(tim).mark_circle(size=90, opacity=0.75).encode(
+            x=alt.X("mae_r:Q", title="Peor momento del trade (MAE, en R)"),
+            y=alt.Y("realized_r:Q", title="Resultado final (R)"),
+            color=alt.Color(
+                "status:N",
+                title="Resultado",
+                scale=alt.Scale(
+                    domain=["hit_target", "hit_stop", "expired"],
+                    range=["#28a745", "#dc3545", "#fd7e14"],
+                ),
+            ),
+            tooltip=[
+                alt.Tooltip("symbol:N", title="Símbolo"),
+                alt.Tooltip("mae_r:Q", title="MAE (R)", format="+.2f"),
+                alt.Tooltip("mfe_r:Q", title="MFE (R)", format="+.2f"),
+                alt.Tooltip("realized_r:Q", title="Resultado (R)", format="+.2f"),
+                alt.Tooltip("status:N", title="Estado"),
+            ],
+        )
+        zero_v = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color="#adb5bd", strokeDash=[4, 4]).encode(x="x:Q")
+        zero_h = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(color="#adb5bd", strokeDash=[4, 4]).encode(y="y:Q")
+        st.caption(
+            "Cada punto es un trade cerrado. Cuanto más pegado a 0 en el eje X (MAE), más limpio el timing "
+            "de entrada — lejos a la izquierda significa que tuvo que aguantar mucho drawdown antes de resolver."
+        )
+        st.altair_chart((scatter + zero_v + zero_h).properties(height=320), use_container_width=True)
+
+    st.divider()
+
     overall = overall_metrics(df_closed)
 
     # ── KPIs ────────────────────────────────────────────────────────────────
