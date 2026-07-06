@@ -13,6 +13,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import altair as alt
+import numpy as np
+import pandas as pd
 import streamlit as st
 
 st.set_page_config(
@@ -78,6 +81,7 @@ st.markdown("""
 .signal-ok   { background: #f0fff4; border: 1px solid #c3e6cb; }
 .signal-warn { background: #fff8f0; border: 1px solid #ffe0b2; }
 .signal-block{ background: #fff5f5; border: 1px solid #f5c6cb; }
+.signal-info { background: #eef6ff; border: 1px solid #b6d4fe; }
 
 /* Score formula */
 .formula {
@@ -142,8 +146,11 @@ st.markdown("""
 # ── Imports del bot ───────────────────────────────────────────────────────────
 
 from alert import (
+    ACCOUNT_SIZE_USD,
+    ALERTS_HISTORY_FILE,
     MIN_RR,
     MIN_SCORE,
+    RISK_PER_TRADE_PCT,
     STOCK_NAMES,
     STOCKS,
     compute_market_breadth,
@@ -153,6 +160,16 @@ from alert import (
     get_symbol_context,
     load_market_context,
 )
+from analyze_alerts_history import (
+    add_derived_columns,
+    closed_only,
+    expectation_table,
+    load_history,
+    overall_metrics,
+    suggestion_lines,
+)
+from advanced_analytics import Settings as MCSettings
+from advanced_analytics import apply_costs, monte_carlo_reorder
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -207,14 +224,56 @@ def _tip(label: str, explanation: str, align: str = "left") -> str:
 
 
 def _signal_row(text: str, kind: str) -> None:
-    icons = {"ok": "✅", "warn": "⚠️", "block": "🚫"}
-    css   = {"ok": "signal-ok", "warn": "signal-warn", "block": "signal-block"}
+    icons = {"ok": "✅", "warn": "⚠️", "block": "🚫", "info": "💡"}
+    css   = {"ok": "signal-ok", "warn": "signal-warn", "block": "signal-block", "info": "signal-info"}
     st.markdown(f"""
     <div class="signal-item {css[kind]}">
       <span>{icons[kind]}</span>
       <span>{text}</span>
     </div>
     """, unsafe_allow_html=True)
+
+
+def _stat_card(icon: str, label: str, value: str, sub: str, color: str) -> None:
+    st.markdown(f"""
+    <div class="card" style="border-left: 4px solid {color}; padding: 0.8rem 1rem;">
+      <div style="font-size:0.78rem;color:#888;">{icon} {label}</div>
+      <div style="font-size:1.7rem;font-weight:700;color:{color};">{value}</div>
+      <div style="font-size:0.75rem;color:{color};">{sub}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# Estado -> (etiqueta con icono, color) para la bitácora e historial de alertas.
+_STATUS_META = {
+    "hit_target": ("✅ Ganador", "#28a745"),
+    "hit_stop": ("🚫 Stop", "#dc3545"),
+    "expired": ("⏱️ Expirado", "#fd7e14"),
+    "open": ("🕐 Abierto", "#6c757d"),
+}
+
+# Mismos supuestos de costos que advanced_analytics.py / CLAUDE.md §6, para que la
+# expectancy en vivo sea comparable con el 0.269R post-costos del backtest de 3 años.
+_MC_RUNS = 2000
+_COST_COMMISSION_USD = 1.0
+_COST_SLIPPAGE_PCT = 0.05
+_BACKTEST_BASELINE_R = 0.269
+
+
+def _profitability_verdict(n_closed: int, p_profit: float, avg_r_costs: float) -> tuple[str, str, str]:
+    """Traduce el bootstrap a un veredicto en lenguaje simple.
+    Umbrales fijos de antemano — no se ajustan a los datos actuales."""
+    if n_closed < 15:
+        return "🔵", "Datos insuficientes todavía para opinar", "#6c757d"
+    if avg_r_costs <= 0:
+        return "🔴", "Sin edge — expectancy negativa incluso con esta muestra", "#dc3545"
+    if n_closed < 30:
+        return "🟡", "Señal positiva, pero la muestra todavía es chica para confirmarlo", "#fd7e14"
+    if p_profit >= 80:
+        return "🟢", "Rentable con confianza estadística razonable", "#28a745"
+    if p_profit >= 60:
+        return "🟡", "Rentable pero no concluyente — seguir de cerca", "#fd7e14"
+    return "🔴", "Sin edge claro — la mayoría de las simulaciones no ganan", "#dc3545"
 
 
 # ── Cache ─────────────────────────────────────────────────────────────────────
@@ -232,6 +291,313 @@ def _get_spy():
 @st.cache_data(ttl=86400, show_spinner=False)
 def _get_context():
     return load_market_context()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _get_alert_history() -> pd.DataFrame | None:
+    """Carga y enriquece alerts_history.csv reusando analyze_alerts_history.py
+    (fuente única de verdad para el cálculo de performance — no duplicar aquí)."""
+    try:
+        raw = load_history(Path(ALERTS_HISTORY_FILE))
+    except (FileNotFoundError, ValueError):
+        return None
+    return add_derived_columns(raw)
+
+
+# ── Vista: Historial de Alertas ────────────────────────────────────────────────
+
+def _render_history_view() -> None:
+    st.caption(
+        "Performance real del bot en producción — aciertos (✅ hit\\_target) y "
+        "desaciertos (🚫 hit\\_stop / ⏱️ expired) de las alertas ya cerradas."
+    )
+
+    df = _get_alert_history()
+    if df is None:
+        st.info(f"Todavía no existe `{ALERTS_HISTORY_FILE}` con alertas registradas.")
+        return
+
+    df_closed = closed_only(df)
+    total = len(df)
+    n_open = int(df["status"].eq("open").sum())
+    n_closed = len(df_closed)
+
+    if df_closed.empty:
+        st.info(
+            f"Hay {total} alertas registradas pero ninguna cerrada todavía "
+            "(todas siguen en seguimiento). Volvé cuando se resuelva la primera."
+        )
+        return
+
+    if n_closed < 30:
+        st.warning(
+            f"Muestra chica: solo **{n_closed}** trades cerrados. Tratá estas cifras "
+            "como orientativas — no como validación estadística (referencia interna del "
+            "proyecto: <30 trades cerrados implica riesgo de overfitting si se ajustan "
+            "parámetros en base a esto)."
+        )
+
+    # ── Veredicto: ¿es rentable? ─────────────────────────────────────────────
+    st.markdown("### ¿El bot es rentable?")
+
+    mc_settings = MCSettings(
+        input_path=Path(ALERTS_HISTORY_FILE),
+        outdir=Path("."),
+        initial_capital=ACCOUNT_SIZE_USD,
+        risk_per_trade_pct=RISK_PER_TRADE_PCT,
+        commission_per_trade=_COST_COMMISSION_USD,
+        slippage_pct=_COST_SLIPPAGE_PCT,
+        mc_runs=_MC_RUNS,
+        rolling_window_trades=30,
+    )
+    r_raw = df_closed["realized_r"]
+    r_costs = apply_costs(r_raw, df_closed, mc_settings)
+    avg_r_raw = float(r_raw.mean())
+    avg_r_costs = float(r_costs.mean())
+
+    mc = monte_carlo_reorder(r_costs, mc_settings, n_runs=_MC_RUNS)
+    p_profit = float((mc["total_return_pct"] > 0).mean() * 100) if not mc.empty else float("nan")
+
+    v_icon, v_headline, v_color = _profitability_verdict(n_closed, p_profit, avg_r_costs)
+
+    st.markdown(f"""
+    <div class="card" style="border-left: 6px solid {v_color}; padding:1.2rem 1.4rem;">
+      <div style="font-size:0.78rem;color:#888;letter-spacing:0.02em;">
+        VEREDICTO — bootstrap de {_MC_RUNS} simulaciones sobre los {n_closed} trades cerrados reales
+      </div>
+      <div style="font-size:1.5rem;font-weight:700;color:{v_color};margin-top:2px;">{v_icon} {v_headline}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    v1, v2, v3, v4 = st.columns(4)
+    v1.metric(
+        "P(retorno > 0)", f"{p_profit:.1f}%" if pd.notna(p_profit) else "N/D",
+        help=f"De {_MC_RUNS} simulaciones que remuestrean (con reemplazo) los {n_closed} trades cerrados reales, "
+             "% que terminaron con ganancia neta. No es una garantía a futuro: resume qué tan robusto es el "
+             "resultado observado frente al azar de qué trades tocaron y en qué orden.",
+    )
+    v2.metric(
+        "Expectancy con costos", f"{avg_r_costs:+.3f}R",
+        help=f"R promedio por trade después de comisión (${_COST_COMMISSION_USD:.2f} round-trip) y slippage "
+             f"({_COST_SLIPPAGE_PCT:.2f}% por lado) — mismos supuestos que el backtest de 3 años. "
+             f"Sin costos: {avg_r_raw:+.3f}R.",
+    )
+    if not mc.empty:
+        med_ret = mc["total_return_pct"].median()
+        p05_ret = mc["total_return_pct"].quantile(0.05)
+        p95_ret = mc["total_return_pct"].quantile(0.95)
+    else:
+        med_ret = p05_ret = p95_ret = float("nan")
+    v3.metric(
+        "Retorno simulado (mediana)", f"{med_ret:+.1f}%" if pd.notna(med_ret) else "N/D",
+        help=f"Retorno mediano sobre ${ACCOUNT_SIZE_USD:,.0f} de capital simulado, con sizing de "
+             f"{RISK_PER_TRADE_PCT:.1f}% de riesgo por trade, a través de las {_MC_RUNS} simulaciones bootstrap.",
+    )
+    v4.metric(
+        "Rango p05 – p95",
+        f"{p05_ret:+.1f}% / {p95_ret:+.1f}%" if pd.notna(p05_ret) else "N/D",
+        help="Intervalo donde cayó el 90% de las simulaciones. Cuanto más ancho, más incertidumbre "
+             "queda todavía con esta cantidad de trades — se va a ir angostando a medida que se acumule muestra.",
+    )
+
+    if not mc.empty:
+        counts, edges = np.histogram(mc["total_return_pct"], bins=30)
+        hist_df = pd.DataFrame({"bin_left": edges[:-1], "bin_right": edges[1:], "count": counts})
+        hist_df["bin_center"] = (hist_df["bin_left"] + hist_df["bin_right"]) / 2
+
+        st.caption(
+            f"Distribución de resultados en las {_MC_RUNS} simulaciones bootstrap "
+            f"(remuestreo con reemplazo de los {n_closed} trades reales)."
+        )
+        hist = alt.Chart(hist_df).mark_bar().encode(
+            x=alt.X("bin_left:Q", title="Retorno total simulado (%)"),
+            x2="bin_right:Q",
+            y=alt.Y("count:Q", title="N° de simulaciones"),
+            color=alt.condition("datum.bin_center >= 0", alt.value("#28a745"), alt.value("#dc3545")),
+            tooltip=[
+                alt.Tooltip("bin_left:Q", format="+.1f", title="Desde %"),
+                alt.Tooltip("bin_right:Q", format="+.1f", title="Hasta %"),
+                alt.Tooltip("count:Q", title="Simulaciones"),
+            ],
+        )
+        zero_rule_mc = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color="#333", strokeWidth=1.5).encode(x="x:Q")
+        st.altair_chart((hist + zero_rule_mc).properties(height=220), use_container_width=True)
+
+    st.caption(
+        f"Referencia: el backtest histórico de 3 años documenta una expectancy de "
+        f"{_BACKTEST_BASELINE_R:+.3f}R/trade post-costos. Real hasta ahora: {avg_r_costs:+.3f}R/trade post-costos "
+        f"({'por encima' if avg_r_costs >= _BACKTEST_BASELINE_R else 'por debajo'} del baseline, con muchísima "
+        "menos muestra que el backtest)."
+    )
+
+    st.divider()
+
+    overall = overall_metrics(df_closed)
+
+    # ── KPIs ────────────────────────────────────────────────────────────────
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Alertas totales", total,
+               help="Todas las alertas generadas por el bot, incluidas las que siguen abiertas.")
+    k2.metric("Cerradas / Abiertas", f"{n_closed} / {n_open}",
+               help="Trades ya resueltos (ganador, stop o expirado) vs. los que el tracker todavía sigue.")
+    k3.metric("Win Rate", f"{overall['win_rate_pct']:.1f}%",
+               help="% de trades cerrados que llegaron al target (hit_target) sobre el total de cerrados.")
+    k4.metric("R promedio realizado", f"{overall['avg_realized_r']:+.2f}R",
+               help="Expectancy real: ganancia/pérdida promedio por trade en múltiplos de riesgo (R). "
+                    "Positivo = el sistema gana dinero en promedio.")
+
+    k5, k6, k7, k8 = st.columns(4)
+    k5.metric("Mediana R", f"{overall['median_realized_r']:+.2f}R",
+               help="La mitad de los trades cerrados rindió más que esto, la otra mitad menos. "
+                    "Menos sensible a outliers que el promedio.")
+    k6.metric("Tasa de Stop", f"{overall['stop_rate_pct']:.1f}%",
+               help="% de trades cerrados que tocaron el stop loss.")
+    k7.metric("Tasa de Expirado", f"{overall['expired_rate_pct']:.1f}%",
+               help="% de trades que se cerraron por vencimiento del plazo máximo (20 barras) "
+                    "sin tocar target ni stop.")
+    k8.metric("Días promedio abierto", f"{overall['avg_days_open']:.1f}",
+               help="Cuántos días de mercado, en promedio, estuvo abierta una posición hasta cerrarse.")
+
+    st.divider()
+
+    # ── Aciertos y desaciertos ──────────────────────────────────────────────
+    st.markdown("##### Aciertos y desaciertos")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        _stat_card("✅", "Ganadores", str(overall["wins"]),
+                    f"{overall['win_rate_pct']:.1f}% de cerradas", "#28a745")
+    with c2:
+        _stat_card("🚫", "Stops", str(overall["stops"]),
+                    f"{overall['stop_rate_pct']:.1f}% de cerradas", "#dc3545")
+    with c3:
+        _stat_card("⏱️", "Expirados", str(overall["expired"]),
+                    f"{overall['expired_rate_pct']:.1f}% de cerradas", "#fd7e14")
+    with c4:
+        pct_open = (n_open / total * 100) if total else 0.0
+        _stat_card("🕐", "Abiertas ahora", str(n_open), f"{pct_open:.1f}% del total", "#6c757d")
+
+    st.divider()
+
+    # ── Curva de equity ─────────────────────────────────────────────────────
+    st.markdown("##### Curva de equity (R acumulado)")
+    st.caption(
+        "Suma acumulada de R realizado, trade a trade, ordenada por fecha de cierre. "
+        "Sube = el sistema viene ganando; baja = viene perdiendo."
+    )
+
+    eq = df_closed.dropna(subset=["realized_r"]).copy()
+    date_col = "closed_utc" if "closed_utc" in eq.columns and eq["closed_utc"].notna().any() else "timestamp_utc"
+    eq = eq.dropna(subset=[date_col]).sort_values(date_col)
+
+    if len(eq) >= 2:
+        eq["cum_r"] = eq["realized_r"].cumsum()
+        eq["trade_n"] = range(1, len(eq) + 1)
+
+        base = alt.Chart(eq).encode(x=alt.X("trade_n:Q", title="N° de trade cerrado"))
+        zero_rule = alt.Chart(pd.DataFrame({"y": [0]})).mark_rule(
+            strokeDash=[4, 4], color="#adb5bd"
+        ).encode(y="y:Q")
+        line = base.mark_line(color="#0066cc", strokeWidth=2.5).encode(
+            y=alt.Y("cum_r:Q", title="R acumulado")
+        )
+        points = base.mark_circle(size=60).encode(
+            y="cum_r:Q",
+            color=alt.condition("datum.realized_r >= 0", alt.value("#28a745"), alt.value("#dc3545")),
+            tooltip=[
+                alt.Tooltip("symbol:N", title="Símbolo"),
+                alt.Tooltip(f"{date_col}:T", title="Cierre"),
+                alt.Tooltip("realized_r:Q", title="R del trade", format="+.2f"),
+                alt.Tooltip("cum_r:Q", title="R acumulado", format="+.2f"),
+                alt.Tooltip("status:N", title="Resultado"),
+            ],
+        )
+        st.altair_chart(
+            (zero_rule + line + points).properties(height=280),
+            use_container_width=True,
+        )
+    else:
+        st.caption("Necesitás al menos 2 trades cerrados con fecha para trazar la curva.")
+
+    st.divider()
+
+    # ── Rendimiento por categoría ───────────────────────────────────────────
+    st.markdown("##### Rendimiento por categoría")
+    dims = {
+        "Playbook": "playbook",
+        "Score": "score_bucket",
+        "RS vs SPY": "rs_bucket",
+        "Extensión": "extension_bucket",
+        "Risk/Reward": "rr_bucket",
+        "Símbolo": "symbol",
+        "Grupo/Sector": "group",
+    }
+    dim_label = st.selectbox("Agrupar por", options=list(dims.keys()))
+    col = dims[dim_label]
+    tbl = expectation_table(df_closed, col)
+
+    if tbl.empty:
+        st.caption("Sin datos suficientes para esta categoría.")
+    else:
+        bar = alt.Chart(tbl).mark_bar(size=18).encode(
+            y=alt.Y(f"{col}:N", sort="-x", title=None),
+            x=alt.X("avg_realized_r:Q", title="R promedio realizado"),
+            color=alt.condition("datum.avg_realized_r >= 0", alt.value("#28a745"), alt.value("#dc3545")),
+            tooltip=[
+                alt.Tooltip(f"{col}:N", title=dim_label),
+                alt.Tooltip("n:Q", title="Trades"),
+                alt.Tooltip("win_rate:Q", title="Win rate %", format=".1f"),
+                alt.Tooltip("avg_realized_r:Q", title="R promedio", format="+.2f"),
+            ],
+        )
+        zero_rule2 = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(color="#adb5bd").encode(x="x:Q")
+        text = bar.mark_text(align="left", dx=4, color="#555").encode(
+            text=alt.Text("avg_realized_r:Q", format="+.2f")
+        )
+        st.altair_chart(
+            (bar + zero_rule2 + text).properties(height=max(120, 32 * len(tbl))),
+            use_container_width=True,
+        )
+
+        st.dataframe(
+            tbl.rename(columns={
+                col: dim_label, "n": "Trades", "win_rate": "Win Rate %",
+                "avg_realized_r": "Avg R", "avg_rr": "Avg RR planificado",
+                "avg_days_open": "Días promedio",
+            }),
+            width="stretch",
+            hide_index=True,
+        )
+
+    st.divider()
+
+    # ── Lecturas automáticas ────────────────────────────────────────────────
+    st.markdown("##### Lecturas automáticas")
+    st.caption(
+        "Observaciones calculadas sobre los trades cerrados — sirven para calibrar "
+        "parámetros, no como verdad absoluta con muestra chica."
+    )
+    for s in suggestion_lines(df_closed):
+        _signal_row(s, "info")
+
+    st.divider()
+
+    # ── Bitácora de trades ──────────────────────────────────────────────────
+    st.markdown("##### Bitácora de trades")
+    log_cols = [
+        "timestamp_utc", "symbol", "playbook", "score", "rr", "status",
+        "realized_r", "days_open", "effective_entry", "resolved_exit_price",
+    ]
+    log_df = df.sort_values("timestamp_utc", ascending=False)[
+        [c for c in log_cols if c in df.columns]
+    ].copy()
+    log_df["status"] = log_df["status"].map(lambda s: _STATUS_META.get(s, (s, "#000"))[0])
+    log_df = log_df.rename(columns={
+        "timestamp_utc": "Fecha alerta", "symbol": "Símbolo", "playbook": "Playbook",
+        "score": "Score", "rr": "RR plan.", "status": "Resultado",
+        "realized_r": "R realizado", "days_open": "Días abierto",
+        "effective_entry": "Entry real", "resolved_exit_price": "Exit",
+    })
+    st.dataframe(log_df, width="stretch", hide_index=True)
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -302,6 +668,18 @@ with st.sidebar:
 
 st.markdown("## Stock Sentinel Inspector")
 st.caption("Motor idéntico al bot v2.10 (breakout-only) · sin Telegram")
+
+view = st.segmented_control(
+    "Vista",
+    options=["🔍 Evaluar Ticker", "📊 Historial de Alertas"],
+    default="🔍 Evaluar Ticker",
+    label_visibility="collapsed",
+)
+
+if view == "📊 Historial de Alertas":
+    st.divider()
+    _render_history_view()
+    st.stop()
 
 col_mode, col_sym, col_btn = st.columns([2, 5, 1])
 
