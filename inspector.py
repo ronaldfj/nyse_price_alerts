@@ -327,14 +327,24 @@ def _get_universe_summary(_ctx: dict, vix: float | None, breadth: float | None) 
     Usa batch download + prefetch de earnings (igual que el scan real de alert.py)
     para no hacer 42 requests secuenciales a yfinance.
 
-    IMPORTANTE: spy_df se obtiene DESPUÉS de prefetch_all_data() y del mismo cache
-    poblado por el batch download. Si se le pasa un spy_df descargado por separado
-    (ej. vía yf.Ticker individual), compute_relative_strength() no puede alinear
-    los índices de fecha entre ambos y devuelve 0.0 en silencio para rs20 de
-    absolutamente todos los símbolos — bug detectado en pruebas manuales."""
+    spy_df se pide DESPUÉS de prefetch_all_data() para reusar el mismo batch
+    download en vez de disparar un fetch individual aparte — es una optimización
+    de cache, no un requisito de corrección: signals.compute_relative_strength()
+    normaliza timezone antes de alinear índices, así que da el mismo resultado
+    sin importar qué combinación de fetch individual/batch haya producido cada
+    dataframe (antes de ese fix, mezclar fuentes hacía que devolviera 0.0 en
+    silencio para rs20 — bug real detectado y corregido en signals.py)."""
     prefetch_all_data(STOCKS)
     prefetch_earnings_parallel(STOCKS)
     spy_df = fetch_data("SPY")
+
+    def _no_data_row(sym: str, motivo: str) -> dict:
+        return {
+            "symbol": sym, "name": STOCK_NAMES.get(sym, sym),
+            "group": STOCK_GROUPS.get(sym, "Other"), "status_key": "no_data",
+            "score": None, "rr": None, "confluence": None, "rsi": None,
+            "extension_pct": None, "rs20": None, "motivo": motivo,
+        }
 
     rows = []
     for sym in STOCKS:
@@ -342,20 +352,10 @@ def _get_universe_summary(_ctx: dict, vix: float | None, breadth: float | None) 
         try:
             sig = evaluate_stock(sym, sym_ctx, vix, spy_df, breadth)
         except Exception as exc:
-            rows.append({
-                "symbol": sym, "name": STOCK_NAMES.get(sym, sym),
-                "group": STOCK_GROUPS.get(sym, "Other"), "status_key": "no_data",
-                "score": None, "rr": None, "confluence": None, "rsi": None,
-                "extension_pct": None, "rs20": None, "motivo": f"Error: {exc}",
-            })
+            rows.append(_no_data_row(sym, f"Error: {exc}"))
             continue
         if sig is None:
-            rows.append({
-                "symbol": sym, "name": STOCK_NAMES.get(sym, sym),
-                "group": STOCK_GROUPS.get(sym, "Other"), "status_key": "no_data",
-                "score": None, "rr": None, "confluence": None, "rsi": None,
-                "extension_pct": None, "rs20": None, "motivo": "Sin datos suficientes (mín. 220 velas)",
-            })
+            rows.append(_no_data_row(sym, "Sin datos suficientes (mín. 220 velas)"))
             continue
 
         if sig.should_alert:
@@ -458,6 +458,9 @@ def _render_universe_view(vix: float | None, breadth: float | None) -> None:
         column_config={
             "Score": st.column_config.NumberColumn(format="%.2f"),
             "RR": st.column_config.NumberColumn(format="%.2f×"),
+            # Filas "Sin datos" meten None en la columna -> pandas la sube a float64
+            # (3 pasa a mostrarse "3.0"). Formato explícito evita el decimal falso.
+            "Confl.": st.column_config.NumberColumn(format="%d"),
             "RSI": st.column_config.NumberColumn(format="%.1f"),
             "Ext%": st.column_config.NumberColumn(format="%.1f%%"),
             "RS20%": st.column_config.NumberColumn(format="%+.1f%%"),
@@ -477,6 +480,7 @@ def _render_universe_view(vix: float | None, breadth: float | None) -> None:
             "nav_view": "🔍 Evaluar Ticker",
             "ticker_mode_radio": _UNIVERSE_LABEL,
             "ticker_selectbox": jump_symbol,
+            "auto_evaluate": True,
         }
         st.rerun()
 
@@ -484,16 +488,17 @@ def _render_universe_view(vix: float | None, breadth: float | None) -> None:
     chart_df = view_df.dropna(subset=["score"])
     if not chart_df.empty:
         st.markdown("##### Score por símbolo")
-        color_map = {k: v[1] for k, v in _UNIVERSE_STATUS_META.items()}
+        # Coloreamos directamente sobre la etiqueta ya humanizada (status_label,
+        # ej. "🔥 Alerta") en vez de status_key + un labelExpr Vega a mano — evita
+        # una expresión JS armada por interpolación de string que rompería en
+        # silencio si alguna etiqueta llegara a contener una comilla simple.
+        color_by_label = {v[0]: v[1] for v in _UNIVERSE_STATUS_META.values()}
         bar = alt.Chart(chart_df).mark_bar().encode(
             y=alt.Y("symbol:N", sort="-x", title=None),
             x=alt.X("score:Q", title="Score total"),
             color=alt.Color(
-                "status_key:N", title="Estado",
-                scale=alt.Scale(domain=list(color_map.keys()), range=list(color_map.values())),
-                legend=alt.Legend(labelExpr=" ".join(
-                    f"datum.value == '{k}' ? '{v[0]}' :" for k, v in _UNIVERSE_STATUS_META.items()
-                ) + " datum.value"),
+                "status_label:N", title="Estado",
+                scale=alt.Scale(domain=list(color_by_label.keys()), range=list(color_by_label.values())),
             ),
             tooltip=[
                 alt.Tooltip("symbol:N", title="Símbolo"),
@@ -664,7 +669,13 @@ def _render_history_view() -> None:
 
         heat_winners = float(winners["mae_r"].mean()) if not winners.empty else float("nan")
         bounce_losers = float(losers["mfe_r"].mean()) if not losers.empty else float("nan")
-        capture_eff = float((winners["realized_r"] / winners["mfe_r"]).mean()) if not winners.empty else float("nan")
+        # mfe_r == 0 en un trade ganador (anomalia de datos) daria division por cero ->
+        # inf, que pd.notna() no filtra (notna(inf) es True) y se mostraria como "infR".
+        winners_with_mfe = winners[winners["mfe_r"] > 0]
+        capture_eff = (
+            float((winners_with_mfe["realized_r"] / winners_with_mfe["mfe_r"]).mean())
+            if not winners_with_mfe.empty else float("nan")
+        )
 
         t1, t2, t3 = st.columns(3)
         t1.metric(
@@ -681,7 +692,7 @@ def _render_history_view() -> None:
                  "dirección total). Cerca de 0R = fueron directo al stop sin ningún avance previo.",
         )
         t3.metric(
-            "Eficiencia de captura", f"{capture_eff * 100:.0f}%" if pd.notna(capture_eff) else "N/D",
+            "Eficiencia de captura", f"{capture_eff * 100:.0f}%" if np.isfinite(capture_eff) else "N/D",
             help="Entre los trades ganadores, qué % del mejor movimiento a favor (MFE) terminó cobrando "
                  "el sistema al cerrar en el target. Bajo = el target queda corto frente a lo que el "
                  "movimiento realmente daba.",
@@ -954,9 +965,7 @@ with st.sidebar:
 # de instanciar los widgets nav_view/ticker_mode_radio/ticker_selectbox — tiene que
 # pasar en este punto del script, previo a su creacion, o Streamlit lo rechaza.
 if "_pending_nav" in st.session_state:
-    pending = st.session_state.pop("_pending_nav")
-    st.session_state.update(pending)
-    st.session_state["auto_evaluate"] = True
+    st.session_state.update(st.session_state.pop("_pending_nav"))
 
 st.markdown("## Stock Sentinel Inspector")
 st.caption("Motor idéntico al bot v2.10 (breakout-only) · sin Telegram")
@@ -970,6 +979,10 @@ view = st.segmented_control(
     key="nav_view",
     label_visibility="collapsed",
 )
+if view is None:
+    # segmented_control es deseleccionable: un clic sobre la pestaña ya activa la
+    # deja en None (sin pestaña marcada) en vez de volver a seleccionarla.
+    view = "🔍 Evaluar Ticker"
 
 if view == "🌐 Resumen Universo":
     st.divider()

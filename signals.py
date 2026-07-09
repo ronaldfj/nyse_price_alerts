@@ -21,10 +21,13 @@ NO incluye evaluate_stock ni evaluate_bar — esos tienen scoring acoplado al mo
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import numpy as np
 import pandas as pd
+
+log = logging.getLogger("stock-sentinel-v2")
 
 
 # ── Defaults publicos (sobrescribibles desde el modulo importador via env) ──
@@ -188,16 +191,38 @@ def compute_relative_strength(
 
     v2.5 Fix #2: alineacion temporal por interseccion de indices — evita errores
     cuando asset y SPY tienen fechas distintas (holidays, IPOs recientes, etc).
+
+    v2.10 Fix: yfinance devuelve indices con tz distinta segun el path de descarga
+    (yf.Ticker().history() → tz-aware "America/New_York"; yf.download(group_by=
+    "ticker") en batch → tz-naive). Si df y spy_df vienen de paths distintos, la
+    interseccion de indices da vacio SIN error — esto devolvia 0.0 en silencio
+    para simbolos con historia de sobra, indistinguible del caso legitimo de
+    "no hay suficiente overlap". Se normaliza a tz-naive antes de intersectar
+    para que el resultado no dependa de que fetch_data() haya usado descarga
+    individual o batch para cada uno.
     """
     if spy_df is None or len(df) < lookback + 2 or len(spy_df) < lookback + 2:
         return 0.0
 
-    common_idx = df.index.intersection(spy_df.index)
+    asset_close = df["Close"]
+    spy_close = spy_df["Close"]
+    if isinstance(asset_close.index, pd.DatetimeIndex) and asset_close.index.tz is not None:
+        asset_close = asset_close.tz_localize(None)
+    if isinstance(spy_close.index, pd.DatetimeIndex) and spy_close.index.tz is not None:
+        spy_close = spy_close.tz_localize(None)
+
+    common_idx = asset_close.index.intersection(spy_close.index)
     if len(common_idx) < lookback + 2:
+        log.warning(
+            "%s: RS sin overlap suficiente vs SPY pese a tener historia de sobra "
+            "(asset=%s barras, spy=%s barras, comunes=%s) — posible mismatch de "
+            "formato de indice entre fuentes de descarga",
+            symbol or "<simbolo>", len(df), len(spy_df), len(common_idx),
+        )
         return 0.0
 
-    asset_aligned = df["Close"].reindex(common_idx).dropna()
-    spy_aligned = spy_df["Close"].reindex(common_idx).dropna()
+    asset_aligned = asset_close.reindex(common_idx).dropna()
+    spy_aligned = spy_close.reindex(common_idx).dropna()
 
     # Re-intersectar tras dropna: un NaN en posiciones distintas reduce el universo comun
     valid_idx = asset_aligned.index.intersection(spy_aligned.index)

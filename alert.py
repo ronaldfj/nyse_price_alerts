@@ -91,6 +91,11 @@ Iteración 2.1:
   - Confluence threshold subido a 4 (backtest: confluence=4 -> 68.4% WR, 0.997R)
   - Hybrid playbook deshabilitado (backtest: avg_R=-0.208, stop rate 73.3%)
   - TSLA y PG excluidos del universo (TSLA avg_R=-0.086 stop=60%, PG avg_R=-0.166 stop=59%)
+    NOTA v2.10: TSLA re-agregada al universo (decision consciente del usuario, no
+    un descuido de este aviso) — el scoring/parametros cambiaron sustancialmente
+    desde v2.5. PG sigue excluida. No hay backtest nuevo que confirme el edge de
+    TSLA bajo v2.10; si empieza a generar alertas en vivo, vigilar de cerca via
+    /analyze antes de confiar en el tamaño de posicion sugerido.
   - TRACKER_MAX_BARS_OPEN=20 para capturar mas pullbacks (expired=43% en pullback)
   - Confluence=5 penaliza en vez de bonificar (backtest: 0% WR, avg_R=-0.543)
   - CONFLUENCE_BONUS: score +0.5 cuando >=3 confluencias de entrada activas
@@ -1332,9 +1337,9 @@ def fetch_data(symbol: str) -> Optional[pd.DataFrame]:
 
 
 # ── Helpers cuantitativos ─────────────────────────────────────────────────────
-def compute_relative_strength(df: pd.DataFrame, spy_df: Optional[pd.DataFrame]) -> float:
+def compute_relative_strength(df: pd.DataFrame, spy_df: Optional[pd.DataFrame], symbol: str = "") -> float:
     """v2.9: delega al modulo signals.py — unica fuente de verdad."""
-    return _signals_compute_rs(df, spy_df, lookback=RS_LOOKBACK)
+    return _signals_compute_rs(df, spy_df, lookback=RS_LOOKBACK, symbol=symbol)
 
 
 # ── v2.5 #6: Breadth filter ──────────────────────────────────────────────────
@@ -1417,7 +1422,7 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     group = STOCK_GROUPS.get(symbol, "Other")
 
     entry = float(last["Close"])
-    rs20 = 0.0 if symbol == "SPY" else compute_relative_strength(df, spy_df)
+    rs20 = 0.0 if symbol == "SPY" else compute_relative_strength(df, spy_df, symbol=symbol)
     recent_vols = df["Volume"].iloc[-(VOLUME_PROFILE_LOOKBACK + 1):-1].values
 
     # FIX (mejora institucional #1): todo el bloque de scoring tecnico (regime/setup/
