@@ -398,15 +398,40 @@ def _render_universe_view(vix: float | None, breadth: float | None) -> None:
     n_none = int((df["status_key"] == "none").sum())
     n_no_data = int((df["status_key"] == "no_data").sum())
 
+    alert_tip = _tip(
+        "Con alerta ahora",
+        f"Cumple TODO a la vez: score ≥ {MIN_SCORE}, RR ≥ {MIN_RR}, confluencia ≥ 2 señales, "
+        "RS vs SPY dentro del mínimo de su sector, y ningún hard block activo. Es lo mismo que "
+        "generaría una alerta real de Telegram en la próxima corrida.",
+    )
+    blocked_tip = _tip(
+        "Bloqueadas",
+        "Tiene al menos un <b>hard block</b> activo: gap overnight &gt;2%, extensión &gt;30% sobre "
+        "EMA200, RSI &gt;75, VIX ≥30, earnings dentro de 5 días, breadth &lt;40%, o confluencia &lt;2 "
+        "señales. Los hard blocks son chequeos aparte del score — <b>por eso una acción puede tener "
+        "score alto (barra larga, más allá de la línea punteada) y aun así estar bloqueada</b>: superar "
+        "el score mínimo es necesario pero no alcanza solo.",
+    )
+    none_tip = _tip(
+        "Sin señal",
+        f"No llega al score mínimo ({MIN_SCORE}) o al RR mínimo ({MIN_RR}), pero tampoco tiene ningún "
+        "hard block activo — simplemente el setup no es lo bastante bueno todavía.",
+    )
+    no_data_tip = _tip(
+        "Sin datos",
+        "Error al descargar el histórico, o menos de 220 velas diarias disponibles (mínimo que exige "
+        "el sistema para calcular EMA200 e indicadores de forma confiable).",
+    )
+
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        _stat_card("🔥", "Con alerta ahora", str(n_alert), "cumplen score + RR + filtros", "#28a745")
+        _stat_card("🔥", alert_tip, str(n_alert), "cumplen score + RR + filtros", "#28a745")
     with c2:
-        _stat_card("🚫", "Bloqueadas", str(n_blocked), "algún hard block activo", "#dc3545")
+        _stat_card("🚫", blocked_tip, str(n_blocked), "algún hard block activo", "#dc3545")
     with c3:
-        _stat_card("⚠️", "Sin señal", str(n_none), "no llegan a score/RR mínimo", "#6c757d")
+        _stat_card("⚠️", none_tip, str(n_none), "no llegan a score/RR mínimo", "#6c757d")
     with c4:
-        _stat_card("❔", "Sin datos", str(n_no_data), "error o histórico insuficiente", "#adb5bd")
+        _stat_card("❔", no_data_tip, str(n_no_data), "error o histórico insuficiente", "#adb5bd")
 
     st.divider()
 
@@ -429,10 +454,17 @@ def _render_universe_view(vix: float | None, breadth: float | None) -> None:
             options=status_options,
             default=status_options,
             format_func=lambda k: _UNIVERSE_STATUS_META.get(k, (k, ""))[0],
+            help="Alerta = pasaría todos los filtros ahora. Bloqueada = algún hard block activo "
+                 "sin importar el score. Sin señal = score/RR insuficiente pero sin bloqueo duro. "
+                 "Sin datos = no se pudo evaluar.",
         )
     with f2:
         group_options = sorted(df["group"].dropna().unique().tolist())
-        group_filter = st.multiselect("Filtrar por grupo/sector", options=group_options, default=group_options)
+        group_filter = st.multiselect(
+            "Filtrar por grupo/sector", options=group_options, default=group_options,
+            help="Sector GICS de cada símbolo — determina, entre otras cosas, el mínimo de RS vs "
+                 "SPY que se le exige (Finance/Health toleran más RS negativa que Tech).",
+        )
 
     view_df = df[df["status_key"].isin(status_filter) & df["group"].isin(group_filter)].copy()
     view_df = view_df.sort_values("score", ascending=False, na_position="last")
@@ -456,14 +488,39 @@ def _render_universe_view(vix: float | None, breadth: float | None) -> None:
         on_select="rerun",
         selection_mode="single-row",
         column_config={
-            "Score": st.column_config.NumberColumn(format="%.2f"),
-            "RR": st.column_config.NumberColumn(format="%.2f×"),
+            "Estado": st.column_config.TextColumn(
+                help="Alerta = pasaría todos los filtros ahora. Bloqueada = algún hard block activo, "
+                     "independiente del score. Sin señal = score/RR no alcanza pero sin bloqueo duro.",
+            ),
+            "Score": st.column_config.NumberColumn(
+                format="%.2f",
+                help=f"Suma de régimen + setup + trigger + ajustes. Mínimo para alertar: {MIN_SCORE}. "
+                     "Un score alto NO garantiza que no esté bloqueada — ver columna Estado/Motivo.",
+            ),
+            "RR": st.column_config.NumberColumn(
+                format="%.2f×", help=f"Risk/Reward planificado. Mínimo para alertar: {MIN_RR}×.",
+            ),
             # Filas "Sin datos" meten None en la columna -> pandas la sube a float64
             # (3 pasa a mostrarse "3.0"). Formato explícito evita el decimal falso.
-            "Confl.": st.column_config.NumberColumn(format="%d"),
-            "RSI": st.column_config.NumberColumn(format="%.1f"),
-            "Ext%": st.column_config.NumberColumn(format="%.1f%%"),
-            "RS20%": st.column_config.NumberColumn(format="%+.1f%%"),
+            "Confl.": st.column_config.NumberColumn(
+                format="%d", help="Cuántas de 5 señales técnicas de entrada coinciden ahora. <2 es "
+                "hard block por sí solo, sin importar el score.",
+            ),
+            "RSI": st.column_config.NumberColumn(
+                format="%.1f", help="RSI (14, Wilder). >75 es hard block por sobreextensión.",
+            ),
+            "Ext%": st.column_config.NumberColumn(
+                format="%.1f%%", help="Distancia del precio a su EMA200. >30% es hard block.",
+            ),
+            "RS20%": st.column_config.NumberColumn(
+                format="%+.1f%%",
+                help="Fuerza relativa vs SPY en 20 sesiones. El mínimo exigido varía por sector "
+                     "(Finance/Health toleran más negativa que Tech).",
+            ),
+            "Motivo principal": st.column_config.TextColumn(
+                help="Si está bloqueada: el primer hard block que la frena. Si no: la primera razón "
+                     "técnica a favor. Es el motivo real por el que el score solo no alcanza.",
+            ),
         },
     )
 
@@ -488,6 +545,14 @@ def _render_universe_view(vix: float | None, breadth: float | None) -> None:
     chart_df = view_df.dropna(subset=["score"])
     if not chart_df.empty:
         st.markdown("##### Score por símbolo")
+        st.markdown(_tip(
+            "¿Por qué hay barras rojas más largas que la línea punteada?",
+            "El color de la barra es el <b>Estado</b> real (rojo = Bloqueada, verde = Alerta, gris = "
+            "Sin señal), no el score. La línea punteada marca el score mínimo, pero superarla no "
+            "alcanza: un hard block (gap, extensión &gt;30%, RSI &gt;75, VIX, earnings, confluencia "
+            "&lt;2, etc.) bloquea la alerta sin importar qué tan alto sea el score. Mirá la columna "
+            "\"Motivo principal\" de la tabla para ver cuál la está frenando.",
+        ), unsafe_allow_html=True)
         # Coloreamos directamente sobre la etiqueta ya humanizada (status_label,
         # ej. "🔥 Alerta") en vez de status_key + un labelExpr Vega a mano — evita
         # una expresión JS armada por interpolación de string que rompería en
@@ -515,7 +580,10 @@ def _render_universe_view(vix: float | None, breadth: float | None) -> None:
             (bar + min_rule).properties(height=max(200, 22 * len(chart_df))),
             use_container_width=True,
         )
-        st.caption(f"Línea punteada = score mínimo para alertar ({MIN_SCORE}).")
+        st.caption(
+            f"Línea punteada = score mínimo para alertar ({MIN_SCORE}). Necesario, no suficiente — "
+            "el color (Estado) manda sobre la posición de la barra."
+        )
 
 
 # ── Vista: Historial de Alertas ────────────────────────────────────────────────
