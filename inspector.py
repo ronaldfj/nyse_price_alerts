@@ -151,6 +151,7 @@ from alert import (
     MIN_RR,
     MIN_SCORE,
     RISK_PER_TRADE_PCT,
+    STOCK_GROUPS,
     STOCK_NAMES,
     STOCKS,
     compute_market_breadth,
@@ -159,6 +160,8 @@ from alert import (
     fetch_vix,
     get_symbol_context,
     load_market_context,
+    prefetch_all_data,
+    prefetch_earnings_parallel,
 )
 from analyze_alerts_history import (
     add_derived_columns,
@@ -170,6 +173,11 @@ from analyze_alerts_history import (
 )
 from advanced_analytics import Settings as MCSettings
 from advanced_analytics import apply_costs, monte_carlo_reorder
+
+# Label del modo "universo fijo" en el selector de Evaluar Ticker — constante a nivel
+# de módulo porque tanto _render_universe_view() (al saltar a un símbolo) como la
+# sección de Evaluar Ticker (al armar el radio) necesitan el mismo valor exacto.
+_UNIVERSE_LABEL = f"Universo ({len(STOCKS)})"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -302,6 +310,207 @@ def _get_alert_history() -> pd.DataFrame | None:
     except (FileNotFoundError, ValueError):
         return None
     return add_derived_columns(raw)
+
+
+_UNIVERSE_STATUS_META = {
+    "alert":   ("🔥 Alerta", "#28a745"),
+    "blocked": ("🚫 Bloqueada", "#dc3545"),
+    "none":    ("⚠️ Sin señal", "#6c757d"),
+    "no_data": ("❔ Sin datos", "#adb5bd"),
+}
+
+
+@st.cache_data(ttl=300, show_spinner=f"Escaneando universo completo ({len(STOCKS)} símbolos)...")
+def _get_universe_summary(_ctx: dict, vix: float | None, breadth: float | None) -> pd.DataFrame:
+    """Evalúa TODOS los símbolos del universo con el mismo motor que un ticker
+    individual (evaluate_stock), en vez de requerir elegir uno a la vez.
+    Usa batch download + prefetch de earnings (igual que el scan real de alert.py)
+    para no hacer 42 requests secuenciales a yfinance.
+
+    IMPORTANTE: spy_df se obtiene DESPUÉS de prefetch_all_data() y del mismo cache
+    poblado por el batch download. Si se le pasa un spy_df descargado por separado
+    (ej. vía yf.Ticker individual), compute_relative_strength() no puede alinear
+    los índices de fecha entre ambos y devuelve 0.0 en silencio para rs20 de
+    absolutamente todos los símbolos — bug detectado en pruebas manuales."""
+    prefetch_all_data(STOCKS)
+    prefetch_earnings_parallel(STOCKS)
+    spy_df = fetch_data("SPY")
+
+    rows = []
+    for sym in STOCKS:
+        sym_ctx = get_symbol_context(_ctx, sym)
+        try:
+            sig = evaluate_stock(sym, sym_ctx, vix, spy_df, breadth)
+        except Exception as exc:
+            rows.append({
+                "symbol": sym, "name": STOCK_NAMES.get(sym, sym),
+                "group": STOCK_GROUPS.get(sym, "Other"), "status_key": "no_data",
+                "score": None, "rr": None, "confluence": None, "rsi": None,
+                "extension_pct": None, "rs20": None, "motivo": f"Error: {exc}",
+            })
+            continue
+        if sig is None:
+            rows.append({
+                "symbol": sym, "name": STOCK_NAMES.get(sym, sym),
+                "group": STOCK_GROUPS.get(sym, "Other"), "status_key": "no_data",
+                "score": None, "rr": None, "confluence": None, "rsi": None,
+                "extension_pct": None, "rs20": None, "motivo": "Sin datos suficientes (mín. 220 velas)",
+            })
+            continue
+
+        if sig.should_alert:
+            status_key = "alert"
+        elif sig.blocked:
+            status_key = "blocked"
+        else:
+            status_key = "none"
+
+        motivo = sig.blocked[0] if sig.blocked else (sig.reasons[0] if sig.reasons else "—")
+        rows.append({
+            "symbol": sig.symbol, "name": sig.name, "group": sig.group,
+            "status_key": status_key, "score": sig.score, "rr": sig.rr,
+            "confluence": sig.confluence_count, "rsi": sig.rsi,
+            "extension_pct": sig.extension_pct, "rs20": sig.rs20, "motivo": motivo,
+        })
+
+    df = pd.DataFrame(rows)
+    df["status_label"] = df["status_key"].map(lambda k: _UNIVERSE_STATUS_META.get(k, (k, "#000"))[0])
+    return df
+
+
+# ── Vista: Resumen del Universo ────────────────────────────────────────────────
+
+def _render_universe_view(vix: float | None, breadth: float | None) -> None:
+    st.caption(
+        f"Los {len(STOCKS)} símbolos del universo evaluados con el mismo motor que un ticker individual "
+        "(`evaluate_stock`), en una sola pasada — sin tener que elegirlos de a uno."
+    )
+
+    ctx = _get_context()
+    df = _get_universe_summary(ctx, vix, breadth)
+
+    if df.empty:
+        st.info("No se pudo evaluar ningún símbolo del universo.")
+        return
+
+    n_alert = int((df["status_key"] == "alert").sum())
+    n_blocked = int((df["status_key"] == "blocked").sum())
+    n_none = int((df["status_key"] == "none").sum())
+    n_no_data = int((df["status_key"] == "no_data").sum())
+
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        _stat_card("🔥", "Con alerta ahora", str(n_alert), "cumplen score + RR + filtros", "#28a745")
+    with c2:
+        _stat_card("🚫", "Bloqueadas", str(n_blocked), "algún hard block activo", "#dc3545")
+    with c3:
+        _stat_card("⚠️", "Sin señal", str(n_none), "no llegan a score/RR mínimo", "#6c757d")
+    with c4:
+        _stat_card("❔", "Sin datos", str(n_no_data), "error o histórico insuficiente", "#adb5bd")
+
+    st.divider()
+
+    if n_alert:
+        st.markdown("##### 🔥 Alertas activas ahora mismo")
+        alert_syms = df[df["status_key"] == "alert"].sort_values("score", ascending=False)
+        st.markdown(
+            "&nbsp;&nbsp;".join(
+                f"**{r.symbol}** ({r.score:.2f})" for r in alert_syms.itertuples()
+            )
+        )
+        st.divider()
+
+    # ── Filtros ───────────────────────────────────────────────────────────
+    f1, f2 = st.columns(2)
+    with f1:
+        status_options = [k for k in ["alert", "blocked", "none", "no_data"] if k in df["status_key"].unique()]
+        status_filter = st.multiselect(
+            "Filtrar por estado",
+            options=status_options,
+            default=status_options,
+            format_func=lambda k: _UNIVERSE_STATUS_META.get(k, (k, ""))[0],
+        )
+    with f2:
+        group_options = sorted(df["group"].dropna().unique().tolist())
+        group_filter = st.multiselect("Filtrar por grupo/sector", options=group_options, default=group_options)
+
+    view_df = df[df["status_key"].isin(status_filter) & df["group"].isin(group_filter)].copy()
+    view_df = view_df.sort_values("score", ascending=False, na_position="last")
+
+    st.divider()
+
+    # ── Tabla resumen ─────────────────────────────────────────────────────
+    st.markdown(f"##### Tabla resumen ({len(view_df)} de {len(df)} símbolos)")
+    table = view_df.rename(columns={
+        "symbol": "Símbolo", "name": "Nombre", "group": "Grupo",
+        "status_label": "Estado", "score": "Score", "rr": "RR",
+        "confluence": "Confl.", "rsi": "RSI", "extension_pct": "Ext%",
+        "rs20": "RS20%", "motivo": "Motivo principal",
+    })[["Símbolo", "Nombre", "Grupo", "Estado", "Score", "RR", "Confl.", "RSI", "Ext%", "RS20%", "Motivo principal"]]
+
+    st.caption("Marcá el ☐ al inicio de una fila para abrirla en \"Evaluar Ticker\" con el análisis completo.")
+    event = st.dataframe(
+        table,
+        width="stretch",
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        column_config={
+            "Score": st.column_config.NumberColumn(format="%.2f"),
+            "RR": st.column_config.NumberColumn(format="%.2f×"),
+            "RSI": st.column_config.NumberColumn(format="%.1f"),
+            "Ext%": st.column_config.NumberColumn(format="%.1f%%"),
+            "RS20%": st.column_config.NumberColumn(format="%+.1f%%"),
+        },
+    )
+
+    selected_rows = event.selection.get("rows", []) if event and event.selection else []
+    if selected_rows:
+        # No se puede reasignar st.session_state["nav_view"] (o las otras keys de
+        # widget) aca: esos widgets ya se instanciaron mas arriba en esta misma
+        # corrida del script y Streamlit prohibe modificar su session_state despues
+        # de eso. Por eso se deja la intencion en una key "pendiente" (sin widget
+        # asociado) y se aplica recien al principio del script, antes de crear
+        # los widgets, en el proximo rerun.
+        jump_symbol = view_df.iloc[selected_rows[0]]["symbol"]
+        st.session_state["_pending_nav"] = {
+            "nav_view": "🔍 Evaluar Ticker",
+            "ticker_mode_radio": _UNIVERSE_LABEL,
+            "ticker_selectbox": jump_symbol,
+        }
+        st.rerun()
+
+    # ── Chart: score por símbolo, coloreado por estado ─────────────────────
+    chart_df = view_df.dropna(subset=["score"])
+    if not chart_df.empty:
+        st.markdown("##### Score por símbolo")
+        color_map = {k: v[1] for k, v in _UNIVERSE_STATUS_META.items()}
+        bar = alt.Chart(chart_df).mark_bar().encode(
+            y=alt.Y("symbol:N", sort="-x", title=None),
+            x=alt.X("score:Q", title="Score total"),
+            color=alt.Color(
+                "status_key:N", title="Estado",
+                scale=alt.Scale(domain=list(color_map.keys()), range=list(color_map.values())),
+                legend=alt.Legend(labelExpr=" ".join(
+                    f"datum.value == '{k}' ? '{v[0]}' :" for k, v in _UNIVERSE_STATUS_META.items()
+                ) + " datum.value"),
+            ),
+            tooltip=[
+                alt.Tooltip("symbol:N", title="Símbolo"),
+                alt.Tooltip("name:N", title="Nombre"),
+                alt.Tooltip("score:Q", title="Score", format=".2f"),
+                alt.Tooltip("rr:Q", title="RR", format=".2f"),
+                alt.Tooltip("status_label:N", title="Estado"),
+            ],
+        )
+        min_rule = alt.Chart(pd.DataFrame({"x": [MIN_SCORE]})).mark_rule(
+            color="#333", strokeDash=[4, 4]
+        ).encode(x="x:Q")
+        st.altair_chart(
+            (bar + min_rule).properties(height=max(200, 22 * len(chart_df))),
+            use_container_width=True,
+        )
+        st.caption(f"Línea punteada = score mínimo para alertar ({MIN_SCORE}).")
 
 
 # ── Vista: Historial de Alertas ────────────────────────────────────────────────
@@ -741,15 +950,31 @@ with st.sidebar:
 
 # ── Header + Input ────────────────────────────────────────────────────────────
 
+# Aplica el salto pedido desde "Resumen Universo" (ver _render_universe_view) ANTES
+# de instanciar los widgets nav_view/ticker_mode_radio/ticker_selectbox — tiene que
+# pasar en este punto del script, previo a su creacion, o Streamlit lo rechaza.
+if "_pending_nav" in st.session_state:
+    pending = st.session_state.pop("_pending_nav")
+    st.session_state.update(pending)
+    st.session_state["auto_evaluate"] = True
+
 st.markdown("## Stock Sentinel Inspector")
 st.caption("Motor idéntico al bot v2.10 (breakout-only) · sin Telegram")
 
+if "nav_view" not in st.session_state:
+    st.session_state["nav_view"] = "🔍 Evaluar Ticker"
+
 view = st.segmented_control(
     "Vista",
-    options=["🔍 Evaluar Ticker", "📊 Historial de Alertas"],
-    default="🔍 Evaluar Ticker",
+    options=["🔍 Evaluar Ticker", "🌐 Resumen Universo", "📊 Historial de Alertas"],
+    key="nav_view",
     label_visibility="collapsed",
 )
+
+if view == "🌐 Resumen Universo":
+    st.divider()
+    _render_universe_view(vix, breadth)
+    st.stop()
 
 if view == "📊 Historial de Alertas":
     st.divider()
@@ -759,23 +984,32 @@ if view == "📊 Historial de Alertas":
 col_mode, col_sym, col_btn = st.columns([2, 5, 1])
 
 with col_mode:
-    mode = st.radio("", ["Universo (42)", "Ticker libre"], horizontal=False, label_visibility="collapsed")
+    mode = st.radio(
+        "", [_UNIVERSE_LABEL, "Ticker libre"], horizontal=False,
+        label_visibility="collapsed", key="ticker_mode_radio",
+    )
 
 with col_sym:
-    if mode == "Universo (42)":
+    if mode == _UNIVERSE_LABEL:
         symbol: str = st.selectbox(
             "",
             options=STOCKS,
             format_func=lambda s: f"{s}  —  {STOCK_NAMES.get(s, s)}",
             label_visibility="collapsed",
+            key="ticker_selectbox",
         )
     else:
-        raw = st.text_input("", value="TSLA", placeholder="Ej: TSLA, COIN, PLTR", label_visibility="collapsed")
+        raw = st.text_input("", value="PLTR", placeholder="Ej: PLTR, COIN, RKLB", label_visibility="collapsed")
         symbol = raw.strip().upper()
 
 with col_btn:
     st.write("")
     evaluar = st.button("Evaluar →", type="primary", use_container_width=True)
+
+# Si venimos de un clic en "Resumen Universo", disparar la evaluación una sola vez
+# sin que el usuario tenga que apretar el botón de nuevo.
+if st.session_state.pop("auto_evaluate", False):
+    evaluar = True
 
 st.divider()
 

@@ -100,20 +100,21 @@ analyze_alerts_history.py ← Análisis de performance en vivo
 
 **Integración Telegram:**
 - Alertas con Markdown (bold, monospace para precios).
-- No hay retry automático en el bot — si la request falla, la alerta se pierde silenciosamente. Considerar wrapper con backoff exponencial.
+- `send_telegram()` reintenta con backoff exponencial (3 intentos, `base_delay=2.0`) solo en errores transitorios (429/5xx). Errores 4xx no transitorios (token o chat_id inválido, Markdown malformado) no se reintentan — reintentar no cambiaría el resultado. El mismo helper `_retry()` se usa también en `fetch_data()`/`batch_download()` de yfinance.
+- Si una alerta no se pudo entregar tras los reintentos, no se pierde en silencio: el símbolo se agrega a `telegram_failures` y se reporta en un mensaje resumen al final de la corrida.
 
 **Persistencia de estado:**
 - `alerts_history.csv` y `stock_state.json` se commitean al repo en cada run. Esto es el mecanismo de persistencia. No usar variables de entorno para estado mutable.
 - El cooldown (`COOLDOWN_HOURS=48`, `POST_STOP_COOLDOWN_HOURS=72`) se lee de `stock_state.json` — si el archivo se corrompe, el sistema pierde cooldowns.
 
-**Universo de 42 símbolos:**
+**Universo de 46 símbolos:**
 
 | Sector | Símbolos |
 |---|---|
-| Tech (12) | AAPL, MSFT, NVDA, AMZN, GOOGL, META, AVGO, AMD, CRM, NOW, ORCL, ANET |
+| Tech (17) | AAPL, MSFT, NVDA, AMZN, GOOGL, META, AVGO, AMD, CRM, NOW, ORCL, ANET, PANW, CRWD, FTNT, ZS, OKTA |
 | Finance (6) | JPM, V, MA, BRK-B, GS, AXP |
 | Health (4) | UNH, LLY, ABT, ISRG |
-| Consumer (4) | HD, COST, NKE, MCD |
+| Consumer (5) | HD, COST, NKE, MCD, TSLA |
 | Industrial (4) | CAT, HON, DE, LMT |
 | Energy (2) | XOM, CVX |
 | ETFs (8) | SPY, QQQ, XLK, XLF, XLV, XLI, XLE, XLP |
@@ -130,7 +131,6 @@ analyze_alerts_history.py ← Análisis de performance en vivo
 
 **Deuda técnica conocida:**
 - `alert.py` tiene ~1969 líneas — candidato a refactoring modular (scoring, filters, tracker como módulos separados).
-- No hay retry en llamadas a Telegram API.
 - No hay multi-timeframe (solo daily). El README documenta esto como próximo paso.
 
 ---
@@ -342,8 +342,7 @@ CORRELATION_GUARD_ENABLED=true
 2. **ML overlay:** Exportar features (features_for_ml.csv ya contemplado en backtest.py) para ranking probabilístico de setups.
 3. **Sector rotation dinámico:** Ajustar universo basado en salud de ETFs sectoriales (XLK, XLF, etc.) en tiempo real.
 4. **Kelly criterion / vol-adjusted sizing:** Reemplazar fixed 1% con sizing adaptativo según edge estimado por score bucket.
-5. **Retry Telegram:** Wrapper con backoff exponencial para alertas críticas.
-6. **Modularización de alert.py:** Separar en `scoring.py`, `filters.py`, `tracker.py` para reducir archivo de ~2000 líneas.
+5. **Modularización de alert.py:** Separar en `scoring.py`, `filters.py`, `tracker.py` para reducir archivo de ~2000 líneas.
 
 ---
 

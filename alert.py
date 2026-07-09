@@ -160,6 +160,14 @@ STOCK_NAMES = {
     "NOW":  "ServiceNow Inc.",
     "ORCL": "Oracle Corp.",
     "ANET": "Arista Networks",
+    # ── Tech / Cybersecurity ──────────────────────────────────────────────
+    "PANW": "Palo Alto Networks",
+    "CRWD": "CrowdStrike Holdings",
+    "FTNT": "Fortinet Inc.",
+    "ZS":   "Zscaler Inc.",
+    "OKTA": "Okta Inc.",
+    # CYBR (CyberArk) excluida: adquirida por PANW en 2025, deslistada — yfinance
+    # devuelve 404/"possibly delisted" (verificado 2026-07-09).
     # ── Finance ───────────────────────────────────────────────────────────
     "JPM":  "JPMorgan Chase",
     "V":    "Visa Inc.",
@@ -177,6 +185,7 @@ STOCK_NAMES = {
     "COST": "Costco Wholesale",
     "NKE":  "Nike Inc.",
     "MCD":  "McDonald's Corp.",
+    "TSLA": "Tesla Inc.",
     # ── Industrial ────────────────────────────────────────────────────────
     "CAT":  "Caterpillar Inc.",
     "HON":  "Honeywell Intl.",
@@ -202,6 +211,8 @@ STOCK_GROUPS = {
     "AAPL": "Tech", "MSFT": "Tech", "NVDA": "Tech", "AMZN": "Tech",
     "GOOGL": "Tech", "META": "Tech", "AVGO": "Tech", "AMD": "Tech",
     "CRM": "Tech", "NOW": "Tech", "ORCL": "Tech", "ANET": "Tech",
+    "PANW": "Tech", "CRWD": "Tech", "FTNT": "Tech", "ZS": "Tech",
+    "OKTA": "Tech",
     # Finance
     "JPM": "Finance", "V": "Finance", "MA": "Finance",
     "BRK-B": "Finance", "GS": "Finance", "AXP": "Finance",
@@ -209,6 +220,7 @@ STOCK_GROUPS = {
     "UNH": "Health", "LLY": "Health", "ABT": "Health", "ISRG": "Health",
     # Consumer
     "HD": "Consumer", "COST": "Consumer", "NKE": "Consumer", "MCD": "Consumer",
+    "TSLA": "Consumer",
     # Industrial
     "CAT": "Industrial", "HON": "Industrial", "DE": "Industrial", "LMT": "Industrial",
     # Energy
