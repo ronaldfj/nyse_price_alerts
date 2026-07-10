@@ -96,6 +96,7 @@ BREAKOUT_RS_MIN     = float(os.getenv("BREAKOUT_RS_MIN", "-0.5"))
 BREAKOUT_NEAR_PCT   = float(os.getenv("BREAKOUT_NEAR_PCT", "0.995"))
 FINAL_RS_MIN        = float(os.getenv("FINAL_RS_MIN", "0.0"))
 TRIGGER_VOL_RATIO   = float(os.getenv("TRIGGER_VOL_RATIO", "1.00"))
+BREAKOUT_VOL_HARD_GATE = float(os.getenv("BREAKOUT_VOL_HARD_GATE", "0"))  # v2.11: 0 = desactivado
 SUPERTREND_PERIOD   = int(os.getenv("SUPERTREND_PERIOD", "10"))
 SUPERTREND_MULT     = float(os.getenv("SUPERTREND_MULTIPLIER", "3.0"))
 SUPERTREND_BLOCK    = os.getenv("SUPERTREND_REGIME_BLOCK", "true").lower() == "true"
@@ -169,6 +170,7 @@ _CORE_PARAMS = scoring.CoreParams(
     slope_consistency_ratio=SLOPE_CONSISTENCY_RATIO,
     slope_weak_penalty=SLOPE_WEAK_PENALTY,
     trigger_vol_ratio=TRIGGER_VOL_RATIO,
+    breakout_vol_hard_gate=BREAKOUT_VOL_HARD_GATE,
     volume_profile_lookback=VOLUME_PROFILE_LOOKBACK,
     volume_profile_penalty=VOLUME_PROFILE_PENALTY,
     supertrend_regime_block=SUPERTREND_BLOCK,

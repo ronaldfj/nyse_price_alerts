@@ -60,6 +60,7 @@ class CoreParams:
     slope_consistency_ratio: float
     slope_weak_penalty: float
     trigger_vol_ratio: float
+    breakout_vol_hard_gate: float
     volume_profile_lookback: int
     volume_profile_penalty: float
     supertrend_regime_block: bool
@@ -414,6 +415,15 @@ def evaluate_core(
         signal_type = "breakout"
         trigger_score += 1.2
         reasons.append("Playbook: Breakout Expansion")
+
+        # v2.11: hard gate de volumen para breakout — Fase C live (n=28 cerrados):
+        # vol<1.5x → -0.482R con 14/18 stops; vol>=1.5x → +1.236R con 50% WR.
+        # Default 0 = desactivado; activar via env SOLO tras validar en backtest A/B.
+        if p.breakout_vol_hard_gate > 0 and vol_ratio < p.breakout_vol_hard_gate:
+            blocked.append(
+                f"Volumen insuficiente para breakout "
+                f"({vol_ratio:.2f}x < {p.breakout_vol_hard_gate:.1f}x hard gate)"
+            )
 
     if signal_type == "none":
         setup_score -= 0.7

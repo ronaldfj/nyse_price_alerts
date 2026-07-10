@@ -251,6 +251,7 @@ EARNINGS_BUFFER_DAYS = int(os.getenv("EARNINGS_BUFFER_DAYS", "5"))
 VIX_BLOCK_LEVEL = float(os.getenv("VIX_BLOCK_LEVEL", "30.0"))
 VIX_CAUTION_LEVEL = float(os.getenv("VIX_CAUTION_LEVEL", "22.0"))
 TRIGGER_VOL_RATIO = float(os.getenv("TRIGGER_VOL_RATIO", "1.00"))
+BREAKOUT_VOL_HARD_GATE = float(os.getenv("BREAKOUT_VOL_HARD_GATE", "0"))  # v2.11: 0 = desactivado
 SETUP_RSI_MIN = float(os.getenv("SETUP_RSI_MIN", "45"))
 SETUP_RSI_MAX = float(os.getenv("SETUP_RSI_MAX", "66"))
 BREAKOUT_RSI_MAX = float(os.getenv("BREAKOUT_RSI_MAX", "76"))
@@ -367,6 +368,7 @@ _CORE_PARAMS = scoring.CoreParams(
     slope_consistency_ratio=SLOPE_CONSISTENCY_RATIO,
     slope_weak_penalty=SLOPE_WEAK_PENALTY,
     trigger_vol_ratio=TRIGGER_VOL_RATIO,
+    breakout_vol_hard_gate=BREAKOUT_VOL_HARD_GATE,
     volume_profile_lookback=VOLUME_PROFILE_LOOKBACK,
     volume_profile_penalty=VOLUME_PROFILE_PENALTY,
     supertrend_regime_block=SUPERTREND_REGIME_BLOCK,
