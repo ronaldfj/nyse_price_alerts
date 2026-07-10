@@ -1,0 +1,5 @@
+A baseline             n= 566  WR= 24.6%  Exp=+0.231R  Total=+130.6R
+B gate=1.5             n= 146  WR= 31.5%  Exp=+0.449R  Total=+65.5R
+
+--- VEREDICTO AUTOMATICO ---
+OK: Gate mejora expectancy (+0.231R -> +0.449R) con n=146. Candidato valido a produccion.
