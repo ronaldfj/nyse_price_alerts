@@ -58,6 +58,7 @@ jobs:
           VIX_BLOCK_LEVEL: "30"
           VIX_CAUTION_LEVEL: "22"
           TRIGGER_VOL_RATIO: "1.00"
+          BREAKOUT_VOL_HARD_GATE: "1.5"  # v2.11: validado en backtest A/B (exp +0.231R->+0.449R, n=146, DD -29.5R->-9.0R)
           SETUP_RSI_MIN: "45"
           SETUP_RSI_MAX: "66"
           BREAKOUT_RSI_MAX: "75"
@@ -167,6 +168,7 @@ jobs:
           RS_LOOKBACK: "20"
           SWING_LOOKBACK: "12"
           TRIGGER_VOL_RATIO: "1.00"
+          BREAKOUT_VOL_HARD_GATE: "1.5"  # v2.11: validado en backtest A/B (exp +0.231R->+0.449R, n=146, DD -29.5R->-9.0R)
           VIX_BLOCK_LEVEL: "30"
           VIX_CAUTION_LEVEL: "22"
           VIX_LOW_LEVEL: "18.0"
