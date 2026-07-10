@@ -1,6 +1,6 @@
-# .github/workflows/backtest-ab-volgate.yml
-# Backtest A/B: baseline v2.10 vs BREAKOUT_VOL_HARD_GATE=1.5
-# Ejecutar manualmente desde la pestaña Actions (workflow_dispatch).
+# Backtest A/B: baseline v2.10 vs BREAKOUT_VOL_HARD_GATE
+# Se dispara con push a ramas ab-test/** o manualmente (workflow_dispatch).
+# Publica resultados commiteados en ab_results/ dentro de la misma rama.
 
 name: Backtest A/B — Vol Hard Gate
 
@@ -13,6 +13,8 @@ on:
       gate:
         description: "Vol hard gate a probar"
         default: "1.5"
+  push:
+    branches: ["ab-test/**"]
 
 concurrency:
   group: backtest-ab
@@ -21,7 +23,9 @@ concurrency:
 jobs:
   ab-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4.2.2
 
@@ -37,20 +41,23 @@ jobs:
         env:
           BREAKOUT_VOL_HARD_GATE: "0"
         run: |
-          python backtest.py --years ${{ inputs.years }}
+          python backtest.py --years ${{ inputs.years || '3' }}
           mv backtest_output run_baseline
 
-      - name: "Run B — vol hard gate ${{ inputs.gate }}"
+      - name: "Run B — vol hard gate"
         env:
-          BREAKOUT_VOL_HARD_GATE: ${{ inputs.gate }}
+          BREAKOUT_VOL_HARD_GATE: ${{ inputs.gate || '1.5' }}
         run: |
-          python backtest.py --years ${{ inputs.years }}
+          python backtest.py --years ${{ inputs.years || '3' }}
           mv backtest_output run_gate
 
       - name: Comparar resultados
         run: |
-          python - << 'EOF'
+          mkdir -p ab_results
+          python - << 'EOF' | tee ab_results/summary.txt
           import pandas as pd, numpy as np
+
+          GATE = "${{ inputs.gate || '1.5' }}"
 
           def stats(path, label):
               df = pd.read_csv(path)
@@ -63,24 +70,33 @@ jobs:
               return len(df), float(np.nanmean(r))
 
           nA, eA = stats("run_baseline/backtest_trades.csv", "A baseline")
-          nB, eB = stats("run_gate/backtest_trades.csv", "B gate=${{ inputs.gate }}")
+          nB, eB = stats("run_gate/backtest_trades.csv", f"B gate={GATE}")
 
-          print("\n--- VEREDICTO AUTOMÁTICO ---")
+          print("\n--- VEREDICTO AUTOMATICO ---")
           if nB < 50:
-              print(f"⚠️  n={nB} < 50 trades: riesgo de overfitting, NO elevar a hard block todavía.")
+              print(f"ADVERTENCIA: n={nB} < 50 trades: riesgo de overfitting, NO elevar a hard block todavia.")
           elif eB > eA:
-              print(f"✅ Gate mejora expectancy ({eA:+.3f}R → {eB:+.3f}R) con n={nB}. Candidato válido a producción.")
+              print(f"OK: Gate mejora expectancy ({eA:+.3f}R -> {eB:+.3f}R) con n={nB}. Candidato valido a produccion.")
           else:
-              print(f"❌ Gate NO mejora expectancy ({eA:+.3f}R → {eB:+.3f}R). Mantener como warning.")
+              print(f"NO: Gate no mejora expectancy ({eA:+.3f}R -> {eB:+.3f}R). Mantener como warning.")
           EOF
+          cp run_baseline/backtest_report.md ab_results/baseline_report.md
+          cp run_gate/backtest_report.md ab_results/gate_report.md
+          cp run_baseline/backtest_trades.csv ab_results/baseline_trades.csv
+          cp run_gate/backtest_trades.csv ab_results/gate_trades.csv
 
-      - name: Subir reportes
+      - name: Publicar resultados en la rama
+        if: github.event_name == 'push'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ab_results
+          git commit -m "chore: resultados backtest A/B vol gate [skip ci]"
+          git push origin HEAD
+
+      - name: Subir reportes como artifact
         uses: actions/upload-artifact@v4.6.2
         with:
           name: backtest-ab-volgate
-          path: |
-            run_baseline/backtest_report.md
-            run_baseline/backtest_trades.csv
-            run_gate/backtest_report.md
-            run_gate/backtest_trades.csv
+          path: ab_results/
           retention-days: 30
