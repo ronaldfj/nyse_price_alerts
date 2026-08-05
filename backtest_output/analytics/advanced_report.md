@@ -1,83 +1,83 @@
 # Advanced Analytics Report
 
 - Archivo: `backtest_output/backtest_trades.csv`
-- Trades cerrados: **251**
+- Trades cerrados: **144**
 - Capital inicial: **$10,000**
 - Riesgo por trade: **1.0%**
 - Comision: **$1.0** | Slippage: **0.05%** por lado
 
 ## Equity Curve (con compounding)
 
-- Capital final: **$18,903.68**
-- Retorno total: **+89.04%**
-- Max drawdown: **-13.34%**
-- Trades en drawdown: **206/251 (82.1%)**
+- Capital final: **$18,693.49**
+- Retorno total: **+86.93%**
+- Max drawdown: **-6.46%**
+- Trades en drawdown: **105/144 (72.9%)**
 
 ## Distribucion de R (sin costos)
 
-- **n**: 251
-- **mean**: 0.265
-- **median**: -0.378
-- **std**: 1.46
+- **n**: 144
+- **mean**: 0.459
+- **median**: -0.108
+- **std**: 2.281
 - **min**: -1.0
-- **max**: 5.338
+- **max**: 21.058
 - **q05**: -1.0
 - **q25**: -1.0
-- **q75**: 1.465
-- **q95**: 2.732
-- **skew**: 0.851
-- **kurtosis**: -0.208
-- **winning_trades**: 115
-- **losing_trades**: 136
-- **expectancy**: 0.265
-- **win_rate_pct**: 45.82
+- **q75**: 1.257
+- **q95**: 2.854
+- **skew**: 5.474
+- **kurtosis**: 46.223
+- **winning_trades**: 70
+- **losing_trades**: 74
+- **expectancy**: 0.459
+- **win_rate_pct**: 48.61
 
 ## Distribucion de R (con costos)
 
-- Expectancy original: **0.265R**
-- Expectancy con costos: **0.211R**
-- Degradacion por costos: **-0.054R/trade**
+- Expectancy original: **0.459R**
+- Expectancy con costos: **0.391R**
+- Degradacion por costos: **-0.068R/trade**
 
 ## Distribucion por bucket de R
 
 | bucket     |   n |   pct |
 |:-----------|----:|------:|
 | < -1.5R    |   0 |   0   |
-| -1.5 a -1R | 117 |  46.6 |
-| -1 a -0.5R |   2 |   0.8 |
-| -0.5 a 0R  |  17 |   6.8 |
-| 0 a 0.5R   |  17 |   6.8 |
-| 0.5 a 1R   |  17 |   6.8 |
-| 1 a 1.5R   |  22 |   8.8 |
-| 1.5 a 2R   |  19 |   7.6 |
-| 2 a 3R     |  31 |  12.4 |
-| 3 a 5R     |   8 |   3.2 |
-| > 5R       |   1 |   0.4 |
+| -1.5 a -1R |   2 |   1.4 |
+| -1 a -0.5R |  61 |  42.4 |
+| -0.5 a 0R  |  11 |   7.6 |
+| 0 a 0.5R   |   7 |   4.9 |
+| 0.5 a 1R   |  14 |   9.7 |
+| 1 a 1.5R   |  21 |  14.6 |
+| 1.5 a 2R   |  12 |   8.3 |
+| 2 a 3R     |   9 |   6.2 |
+| 3 a 5R     |   4 |   2.8 |
+| > 5R       |   3 |   2.1 |
 
 ## Monte Carlo (2000 simulaciones)
 
-- Capital final mediano: **$19,024.07**
-- Capital final p05 (peor 5%): **$13,057.52**
-- Capital final p95 (mejor 5%): **$27,648.13**
-- Drawdown mediano: **-10.43%**
-- Drawdown p95 (peor caso): **-18.16%**
-- Mediana de prob. de ganar dinero: **99.9%**
-- Max losses consecutivas (p95): **12**
-- Max losses consecutivas peor caso: **20**
+- Capital final mediano: **$18,519.75**
+- Capital final p05 (peor 5%): **$12,821.46**
+- Capital final p95 (mejor 5%): **$29,500.25**
+- Drawdown mediano: **-7.65%**
+- Drawdown p95 (peor caso): **-13.10%**
+- Mediana de prob. de ganar dinero: **99.8%**
+- Max losses consecutivas (p95): **10**
+- Max losses consecutivas peor caso: **19**
 
 ## Rolling Metrics (ventana=30 trades)
 
-- Sharpe rolling promedio: **0.151**
-- Sharpe rolling min: **-0.415**
-- Sharpe rolling max: **0.493**
-- Mean R primera mitad: **0.244R**
-- Mean R segunda mitad: **0.223R**
-- Edge degradation: **-0.021R**
+- Sharpe rolling promedio: **0.225**
+- Sharpe rolling min: **-0.024**
+- Sharpe rolling max: **0.478**
+- Mean R primera mitad: **0.356R**
+- Mean R segunda mitad: **0.378R**
+- Edge degradation: **+0.022R**
 
 ## Time Exposure
 
-- **n_trades**: 251
-- **avg_bars_per_trade**: 8.95
+- **n_trades**: 144
+- **avg_bars_per_trade**: 8.9
 
 ## Veredicto cuantitativo
 
