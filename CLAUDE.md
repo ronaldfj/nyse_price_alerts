@@ -237,11 +237,12 @@ Max hold:            20 barras (TRACKER_MAX_BARS_OPEN)
 | Expectancy | 0.302R/trade (0.26R post-costos), n=151 |
 | Win Rate | 35.1% hit target / 45.7% con R>0 |
 | Trades/año | ~50 |
-| Max Drawdown | -8.4% (Monte Carlo p95: -15.2%) |
+| Max Drawdown | -13.5% cronológico (Monte Carlo p95: -14.5%) |
 | Confluencia=4: WR | 70%, 0.844R (n=20) ← señal de mayor calidad |
 | Confluencia=5: WR | 28.6%, 0.008R (n=7) ← evitar (chasing) |
 | Confluencia=2 | 0.113R (n=25) |
-| Edge degradation | -0.272R (2da mitad peor) — vigilar |
+| Edge 1ra vs 2da mitad (cronológico) | +0.03R → +0.53R — sin degradación |
+| Últimos 20 trades (jun–nov 2026) | -0.28R — dentro de la varianza (ver nota) |
 | Vivo vs backtest (desde 2026-07-10) | vivo -0.256R (n=19) vs backtest -0.238R (n=18) — paridad OK |
 
 **v2.11 — entrada real en backtest:** el stop/target se calculan sobre el cierre de la barra de señal pero la entrada es el Open siguiente. Un gap a la baja ≤2% podía dejar riesgo ~0 o negativo (XLP 2024-08-02: +21R). `scoring.check_entry_at_open()` descarta el trade si `real_entry - stop < MIN_ENTRY_RISK_ATR × ATR` o si el R:R real < `MIN_RR` — lo usan backtest.py **y** alert.py (bloquea la alerta con el Open del día). El stop se ejecuta al Open cuando hay gap-through (backtest y tracker en vivo; R puede ser < -1).
@@ -252,7 +253,10 @@ Max hold:            20 barras (TRACKER_MAX_BARS_OPEN)
 - Filtros antes solo-vivo ahora en backtest: earnings históricos (`get_earnings_dates`, requiere `lxml`), breadth histórica (ETFs sectoriales sobre EMA200) y correlation guard (1 por grupo por vela de señal). Trades abiertos al final del histórico quedan `open` y fuera de métricas.
 - Vivo: earnings comparado por día calendario NY (antes por segundos: NOW 10-23 pasó a 5.08 días del reporte → -3.5R); correlation guard considera alertas ya emitidas para la misma vela (antes el 2do del sector salía en la corrida siguiente); `BREADTH_MIN_PCT/BLOCK_BELOW` ahora llegan a `scoring.CoreParams`.
 - Resultado: desde 2026-07-10, 18/20 alertas en vivo reproducidas con idéntico status (antes 11/20); las 2 restantes son las que los fixes de earnings/corr guard en vivo ahora bloquean.
+- **Bug de orden en analytics:** `closed_utc` del backtest era `datetime.now()` de la corrida → `advanced_analytics` ordenaba los trades por símbolo, no por fecha. Equity curve, drawdown, rolling Sharpe y "edge degradation" eran alfabéticos (el -0.272R reportado era artefacto; cronológico es +0.504R y el DD real -13.5%, no -8.4%). Ahora `closed_utc` = fecha de salida y el loader ordena por `exit_date`.
 - Alertas abr–jul 2026 (pre-unificación de motores) **no son comparables**: su precio coincide con la vela intradía del día de la corrida, no con la vela de señal. Excluirlas al evaluar el vivo.
+
+**Racha reciente (análisis 2026-11-24):** los últimos 20 trades (salidas jun–nov 2026) promedian -0.28R vs +0.39R previo. Con edge constante, una racha de 20 así aparece en algún punto de 151 trades el 59% de las veces (bootstrap); la peor histórica fue -0.48R (nov-2024) y el sistema se recuperó. Las pérdidas recientes se reparten en todos los grupos y en todos los buckets de extensión/RS/ADX, y esos mismos buckets NO predecían pérdidas en el periodo previo → no hay filtro justificable sin overfitting (n=20). Watch items sin muestra suficiente: `vol_ratio > 3` (-0.85R, n=8) y RS20 > 10 (0.06R, n=33). Regla de revisión: si la media rolling de 30 trades en vivo (post 2026-07-10) cae bajo **-0.37R** (p05 del peor rolling-30 bajo edge constante, bootstrap; peor histórico real -0.22R), tratarlo como cambio de régimen y re-auditar.
 
 **Costos incluidos en backtest:**
 - Comisión: $1 round-trip

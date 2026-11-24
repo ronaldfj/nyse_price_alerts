@@ -72,16 +72,22 @@ def load_trades(path: Path) -> pd.DataFrame:
         df["status"] = df["status"].fillna("open").astype(str).str.lower().str.strip()
         df = df[df["status"].isin(["hit_target", "hit_stop", "expired"])].copy()
 
-    # Fecha de cierre
-    if "closed_utc" in df.columns:
-        df["closed_dt"] = pd.to_datetime(df["closed_utc"], utc=True, errors="coerce")
-    elif "exit_date" in df.columns:
-        df["closed_dt"] = pd.to_datetime(df["exit_date"], utc=True, errors="coerce")
-    else:
-        df["closed_dt"] = pd.to_datetime(df.get("timestamp_utc"), utc=True, errors="coerce")
+    # Fecha de cierre — v2.12 FIX: prioriza exit_date (fecha de mercado real de la salida).
+    # Antes priorizaba closed_utc, que en backtest_trades.csv era la hora de ejecucion del
+    # backtest (identica para todos los trades, en orden de simbolo): la equity curve, el
+    # drawdown, el rolling Sharpe y el "edge degradation" salian en orden alfabetico. En el
+    # vivo closed_utc es la hora en que el tracker DETECTO el cierre (corrida siguiente),
+    # tambien menos precisa que exit_date. closed_utc/timestamp_utc quedan como fallback.
+    closed_dt = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns, UTC]")
+    for col in ("exit_date", "closed_utc", "timestamp_utc"):
+        if col in df.columns:
+            closed_dt = closed_dt.fillna(pd.to_datetime(df[col], utc=True, errors="coerce"))
+    df["closed_dt"] = closed_dt
 
     df = df.dropna(subset=["closed_dt", "price", "stop"])
-    df = df.sort_values("closed_dt").reset_index(drop=True)
+    # desempate estable por vela de señal para trades que cierran el mismo dia
+    sort_cols = ["closed_dt"] + (["trigger_candle_utc"] if "trigger_candle_utc" in df.columns else [])
+    df = df.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
 
     # FIX (mejora institucional #2): "effective_entry" = real_entry (Open real de la
     # primera barra posterior a la señal/alerta) cuando esta disponible, si no "price".

@@ -598,7 +598,12 @@ def backtest_symbol(
             continue
 
         # Ensamblar fila compatible con alerts_history.csv
-        now_str = datetime.now(timezone.utc).isoformat()
+        # v2.12 FIX: closed_utc era datetime.now() de la corrida del backtest — todos los
+        # trades quedaban con la misma fecha (en el orden de generacion, por simbolo) y
+        # advanced_analytics ordenaba por ella: equity curve, drawdown, rolling Sharpe y
+        # "edge degradation" se calculaban en orden ALFABETICO, no cronologico. Ahora es
+        # la fecha real de salida (vacio si el trade sigue abierto), como en el vivo.
+        closed_str = f"{outcome['exit_date']}T20:00:00+00:00" if outcome["exit_date"] else ""
         row = {
             "timestamp_utc":     sig["trigger_dt"].isoformat(),
             "trigger_candle_utc":sig["trigger_dt"].isoformat(),
@@ -640,7 +645,7 @@ def backtest_symbol(
             "exit_date":         outcome["exit_date"],
             "exit_price":        _fmt(outcome["exit_price"]),
             "exit_reason":       outcome["exit_reason"],
-            "closed_utc":        now_str,
+            "closed_utc":        closed_str,
             # extras ML
             "year":              str(bar_dt.year),
             "month":             str(bar_dt.month),
