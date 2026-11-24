@@ -124,6 +124,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Optional
 
@@ -246,6 +247,8 @@ DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 MIN_SCORE = float(os.getenv("MIN_SCORE", "5.8"))
 MIN_RR = float(os.getenv("MIN_RR", "1.6"))
+# v2.11: riesgo minimo (en ATR) contra el Open real — ver scoring.check_entry_at_open
+MIN_ENTRY_RISK_ATR = float(os.getenv("MIN_ENTRY_RISK_ATR", "0.5"))
 COOLDOWN = int(os.getenv("COOLDOWN_HOURS", "48")) * 3600
 EARNINGS_BUFFER_DAYS = int(os.getenv("EARNINGS_BUFFER_DAYS", "5"))
 VIX_BLOCK_LEVEL = float(os.getenv("VIX_BLOCK_LEVEL", "30.0"))
@@ -384,6 +387,8 @@ _CORE_PARAMS = scoring.CoreParams(
     etf_rs_floor=ETF_RS_FLOOR,
     index_etfs=frozenset(INDEX_ETFS),
     sector_etfs=frozenset(SECTOR_ETFS),
+    breadth_min_pct=BREADTH_MIN_PCT,
+    breadth_block_below=BREADTH_BLOCK_BELOW,
 )
 
 # v2.5 Fix #3: tracking de simbolos donde fallo earnings — para reportarlo al final
@@ -994,19 +999,22 @@ def update_alert_history_tracker() -> dict[str, int]:
         for idx, bar in trade_df.iterrows():
             bar_low = float(bar["Low"])
             bar_high = float(bar["High"])
+            # v2.11: gap-through — si abre bajo el stop, la orden se ejecuta al Open
+            # (mismo criterio que backtest.simulate_trade)
+            stop_fill = min(stop, float(bar["Open"]))
 
             hit_stop = bar_low <= stop
             hit_target = bar_high >= target
 
             if hit_stop and hit_target:
                 exit_status = "hit_stop"
-                exit_price = stop
+                exit_price = stop_fill
                 exit_date = idx.date().isoformat()
                 exit_reason = "same_bar_both_hit_stop_first"
                 break
             if hit_stop:
                 exit_status = "hit_stop"
-                exit_price = stop
+                exit_price = stop_fill
                 exit_date = idx.date().isoformat()
                 exit_reason = "stop_hit"
                 break
@@ -1197,10 +1205,12 @@ def get_earnings_info(symbol: str) -> tuple[Optional[str], bool]:
     if earnings_dt.tzinfo is None:
         earnings_dt = earnings_dt.replace(tzinfo=timezone.utc)
 
-    # Usar total_seconds para evitar truncamiento de .days
-    # Ejemplo: 5 días y 23 horas → .days = 5 (pasa el filtro), total = 5.96 (bloqueado)
-    diff_seconds = abs((earnings_dt - now).total_seconds())
-    days_diff = diff_seconds / 86400.0
+    # v2.12: comparar por DIA CALENDARIO (fecha de NY), no por segundos. Con segundos,
+    # un reporte after-hours (16:00 ET) a 5 dias de una corrida de la tarde quedaba en
+    # 5.0x dias y pasaba el filtro (NOW 2026-10-23 -> earnings 10-28: -3.5R por el gap).
+    # El backtest usa esta misma regla, por dia.
+    ny = ZoneInfo("America/New_York")
+    days_diff = abs((earnings_dt.astimezone(ny).date() - now.astimezone(ny).date()).days)
     date_str = earnings_dt.strftime("%Y-%m-%d")
     return date_str, days_diff <= EARNINGS_BUFFER_DAYS
 
@@ -1453,6 +1463,16 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     if gap_blocked:
         blocked.append(f"Gap overnight {gap_pct:.1f}% > {GAP_BLOCK_PCT}% — entry invalida")
 
+    # v2.11: revalidar riesgo y R:R contra el Open de hoy (la entrada real), con el mismo
+    # helper que usa backtest.py — asi una alerta emitida es exactamente un trade que el
+    # backtest tambien habria tomado. Misma convencion que detect_overnight_gap: iloc[-1]
+    # es la sesion en curso.
+    entry_reject = scoring.check_entry_at_open(
+        float(df["Open"].iloc[-1]), core.stop, core.tp, core.atr, MIN_RR, MIN_ENTRY_RISK_ATR,
+    )
+    if entry_reject:
+        blocked.append(entry_reject)
+
     if sym_context.get("hard_block_long"):
         blocked.append(f"Bloqueo manual: {sym_context.get('note', 'sin nota')}")
 
@@ -1679,10 +1699,21 @@ def main() -> None:
         log.info("Candidatos pre-ranking: %s", [(c.symbol, c.rank_score) for c in candidates])
 
         # v2.5 #10: correlation guard — solo top 1 por sector
+        # v2.12 FIX: el guard era por corrida. Como cada vela de señal se evalua en 2
+        # corridas (10:12 y 15:12), el 2do del sector salia en la corrida siguiente —
+        # el top ya estaba en cooldown y no competia (UNH tras LLY, 2026-10-16). Ahora
+        # cuentan tambien los sectores ya alertados en el historico para la MISMA vela.
         sectors_used: set[str] = set()
+        alerted_same_candle = {
+            ((r.get("trigger_candle_utc") or "").strip(), (r.get("group") or "").strip())
+            for r in history_rows
+        }
         approved: list[StockSignal] = []
         for sig in candidates:
-            if CORRELATION_GUARD_ENABLED and sig.group in sectors_used:
+            if CORRELATION_GUARD_ENABLED and (
+                sig.group in sectors_used
+                or (sig.trigger_candle_utc, sig.group) in alerted_same_candle
+            ):
                 stats["corr_guard"] += 1
                 log.info(
                     "🔗 CORR GUARD %s (grupo=%s ya tiene alerta de mayor rank)",

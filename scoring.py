@@ -574,3 +574,32 @@ def passes_final_filters(
         and benchmark_ok
         and rs_ok
     )
+
+
+# ── Revalidacion de la entrada real (Open t+1) ───────────────────────────────
+def check_entry_at_open(
+    real_entry: float,
+    stop: float,
+    target: float,
+    atr: float,
+    min_rr: float,
+    min_risk_atr: float,
+) -> Optional[str]:
+    """v2.11: stop/target se calculan sobre el cierre de la barra de señal, pero la
+    orden se ejecuta al Open siguiente. Si ese Open cae cerca (o debajo) del stop, el
+    riesgo real tiende a 0 y el R de cualquier ganador se infla; si sube, el R:R real
+    se comprime por debajo del minimo. Compartido por backtest.py (al simular la
+    entrada) y alert.py (al emitir la alerta, cuando el Open del dia ya existe), para
+    que vivo y backtest tomen exactamente los mismos trades.
+
+    Retorna None si la entrada es valida, o el motivo del rechazo."""
+    risk = real_entry - stop
+    if risk < min_risk_atr * atr:
+        return (
+            f"Riesgo real al Open insuficiente ({risk / max(atr, 1e-9):.2f} ATR < "
+            f"{min_risk_atr:.2f} ATR) — el Open quedo pegado al stop"
+        )
+    real_rr = (target - real_entry) / risk
+    if real_rr < min_rr:
+        return f"R:R real al Open insuficiente ({real_rr:.2f} < {min_rr:.2f})"
+    return None

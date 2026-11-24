@@ -97,6 +97,7 @@ jobs:
           ACCOUNT_SIZE_USD: "10000"
           RISK_PER_TRADE_PCT: "1.0"
           GAP_BLOCK_PCT: "2.0"
+          MIN_ENTRY_RISK_ATR: "0.5"  # v2.11: riesgo minimo vs Open real (scoring.check_entry_at_open)
           GAP_FILTER_ENABLED: "true"
           CORRELATION_GUARD_ENABLED: "true"
           BATCH_DOWNLOAD_ENABLED: "true"
@@ -184,6 +185,25 @@ jobs:
           VOLUME_PROFILE_LOOKBACK: "3"
           VOLUME_PROFILE_PENALTY: "0.5"
           FINAL_RS_MIN_BY_GROUP: "Finance:-4.0,Health:-4.0,Consumer:-2.0,Industrial:-2.0,Energy:-3.0"
+          # v2.12: paridad con run-alert — mismos filtros/cooldowns/time-stop que el vivo
+          MIN_ENTRY_RISK_ATR: "0.5"
+          COOLDOWN_HOURS: "48"
+          POST_STOP_COOLDOWN_HOURS: "72"
+          POST_STOP_SCORE_PENALTY: "1.0"
+          TRACKER_MAX_BARS_OPEN: "20"
+          EARNINGS_BUFFER_DAYS: "5"
+          GAP_BLOCK_PCT: "2.0"
+          BREADTH_ENABLED: "true"
+          BREADTH_MIN_PCT: "50.0"
+          BREADTH_BLOCK_BELOW: "40.0"
+          CORRELATION_GUARD_ENABLED: "true"
+          CONFLUENCE_HARD_FLOOR: "2"
+          CONFLUENCE_SOFT_FLOOR: "3"
+          CONFLUENCE_LOW_PENALTY: "0.5"
+          SUPERTREND_BLOCK_ADX_MIN: "15.0"
+          SUPERTREND_BLOCK_RS_NEG: "true"
+          ETF_RS_FLOOR: "-3.0"
+          ALERT_ETFS: "false"
         run: |
           python backtest.py --years 3 --export-features
 

@@ -8,7 +8,7 @@
 ## 1. Identidad del Proyecto
 
 **Nombre:** Stock Sentinel Bot — RGTNYSE  
-**Versión activa:** v2.11 (breakout-only)  
+**Versión activa:** v2.12 (breakout-only)  
 **Objetivo:** Escáner automatizado de acciones con análisis técnico multi-capa, alertas vía Telegram y backtesting reproducible. Corre de forma autónoma en GitHub Actions dos veces al día durante la sesión de NY.
 
 **Stack:**
@@ -83,7 +83,7 @@ analyze_alerts_history.py ← Análisis de performance en vivo
 - Cualquier nuevo indicador debe pasar validación en `validate_ohlcv()` (mínimo 220 barras para warm-up).
 
 **Áreas de riesgo estadístico:**
-- Confluence=5 (5/5 señales): backtested a 25% WR, -0.014R (n=8, v2.11). No aumentar el bonus por confluencia alta sin revalidar.
+- Confluence=5 (5/5 señales): backtested a 28.6% WR, 0.008R (n=7, v2.12). No aumentar el bonus por confluencia alta sin revalidar.
 - Pullback playbook: eliminado en v2.10 por expectancy de 0.009R (21 trades — muestra insuficiente para edge real). Si se reactiva, exigir mínimo 100 trades en backtest.
 - Extension penalty: cuadrática por diseño (no lineal). No simplificar a lineal sin testear impacto en distribución de R.
 
@@ -230,23 +230,29 @@ Max hold:            20 barras (TRACKER_MAX_BARS_OPEN)
 
 ---
 
-## 6. Performance Actual (v2.11 — Backtest 3 años, corrida 2026-11-24)
+## 6. Performance Actual (v2.12 — Backtest 3 años con paridad vivo, corrida 2026-11-24)
 
 | Métrica | Valor |
 |---|---|
-| Expectancy | 0.346R/trade (0.302R post-costos), n=136 |
-| Win Rate | 33.1% hit target / 48.5% con R>0 |
-| Trades/año | ~45 |
-| Max Drawdown | -6.5% (Monte Carlo p95: -14.9%) |
-| Confluencia=4: WR | 64.3%, 1.56R (n=14) ← señal de mayor calidad |
-| Confluencia=5: WR | 25%, -0.014R (n=8) ← evitar (chasing) |
-| Confluencia=2 | 0.21R (n=29) — no justifica subir el hard floor a 3 |
-| En vivo (abr–nov 2026) | -0.03R post-costos, n=63 — ver nota de drift |
+| Expectancy | 0.302R/trade (0.26R post-costos), n=151 |
+| Win Rate | 35.1% hit target / 45.7% con R>0 |
+| Trades/año | ~50 |
+| Max Drawdown | -8.4% (Monte Carlo p95: -15.2%) |
+| Confluencia=4: WR | 70%, 0.844R (n=20) ← señal de mayor calidad |
+| Confluencia=5: WR | 28.6%, 0.008R (n=7) ← evitar (chasing) |
+| Confluencia=2 | 0.113R (n=25) |
+| Edge degradation | -0.272R (2da mitad peor) — vigilar |
+| Vivo vs backtest (desde 2026-07-10) | vivo -0.256R (n=19) vs backtest -0.238R (n=18) — paridad OK |
 
-**v2.11 — fix de entrada real en backtest:** el stop/target se calculan sobre el cierre de la barra de señal pero la entrada es el Open t+1. Un gap a la baja ≤2% podía dejar riesgo ~0 o negativo (XLP 2024-08-02: +21R) e inflar la expectancy (0.508R → 0.346R al corregir). Ahora `backtest_symbol()` descarta el trade si `real_entry - stop < MIN_ENTRY_RISK_ATR × ATR` o si el R:R real < `MIN_RR`, y `simulate_trade()` ejecuta el stop al Open cuando hay gap-through (R puede ser < -1).
+**v2.11 — entrada real en backtest:** el stop/target se calculan sobre el cierre de la barra de señal pero la entrada es el Open siguiente. Un gap a la baja ≤2% podía dejar riesgo ~0 o negativo (XLP 2024-08-02: +21R). `scoring.check_entry_at_open()` descarta el trade si `real_entry - stop < MIN_ENTRY_RISK_ATR × ATR` o si el R:R real < `MIN_RR` — lo usan backtest.py **y** alert.py (bloquea la alerta con el Open del día). El stop se ejecuta al Open cuando hay gap-through (backtest y tracker en vivo; R puede ser < -1).
 
-**Drift backtest vs vivo (pendiente):** en el mismo periodo el backtest genera ~9 trades y el vivo 63; 50 de los 63 salen de la corrida de 10:12 AM sobre la vela diaria aún abierta, que el backtest nunca simula. Además el backtest no aplica el bloqueo por earnings.
-| Pullback (eliminado) | 0.009R — sin edge estadístico |
+**v2.12 — paridad vivo/backtest:** auditoría alerta por alerta. Hallazgos y fixes:
+- **Bug crítico:** el backtest entraba en el Open de señal+2 (doble desplazamiento: `evaluate_bar(i)` ya usa `i-1` como señal y se llamaba `simulate_trade(df, i)`). Ahora `simulate_trade(df, i-1)`, igual que el vivo (Open del día siguiente a la señal).
+- Time-stop del backtest 15 → `TRACKER_MAX_BARS_OPEN` (20). Cooldowns como días calendario entre corridas (`COOLDOWN_HOURS`, `POST_STOP_COOLDOWN_HOURS` + score +`POST_STOP_SCORE_PENALTY`), sin look-ahead sobre trades abiertos.
+- Filtros antes solo-vivo ahora en backtest: earnings históricos (`get_earnings_dates`, requiere `lxml`), breadth histórica (ETFs sectoriales sobre EMA200) y correlation guard (1 por grupo por vela de señal). Trades abiertos al final del histórico quedan `open` y fuera de métricas.
+- Vivo: earnings comparado por día calendario NY (antes por segundos: NOW 10-23 pasó a 5.08 días del reporte → -3.5R); correlation guard considera alertas ya emitidas para la misma vela (antes el 2do del sector salía en la corrida siguiente); `BREADTH_MIN_PCT/BLOCK_BELOW` ahora llegan a `scoring.CoreParams`.
+- Resultado: desde 2026-07-10, 18/20 alertas en vivo reproducidas con idéntico status (antes 11/20); las 2 restantes son las que los fixes de earnings/corr guard en vivo ahora bloquean.
+- Alertas abr–jul 2026 (pre-unificación de motores) **no son comparables**: su precio coincide con la vela intradía del día de la corrida, no con la vela de señal. Excluirlas al evaluar el vivo.
 
 **Costos incluidos en backtest:**
 - Comisión: $1 round-trip
@@ -278,7 +284,7 @@ Ante cualquier requerimiento de cambio, aplicar este orden:
 # Scoring
 MIN_SCORE=5.8
 MIN_RR=0.8
-MIN_ENTRY_RISK_ATR=0.5   # backtest: riesgo mínimo vs entrada real (Open t+1)
+MIN_ENTRY_RISK_ATR=0.5   # riesgo mínimo vs Open real (backtest + vivo)
 COOLDOWN_HOURS=48
 POST_STOP_COOLDOWN_HOURS=72
 
@@ -334,7 +340,7 @@ CORRELATION_GUARD_ENABLED=true
 | Decisión | Versión | Razón |
 |---|---|---|
 | Solo breakout (no pullback) | v2.10 | Pullback: 0.009R en 21 trades — sin edge |
-| Entrada en t+1 Open (anti look-ahead) | v2.9 | Corrección de bug crítico de simulación |
+| Entrada en t+1 Open (anti look-ahead) | v2.9 / v2.12 | Corrección de bug crítico de simulación; v2.12 corrige doble desplazamiento (entraba en t+2) |
 | Signals.py como fuente única | v2.9 | Eliminar drift entre alert y backtest |
 | Confluence hard floor < 2 = block | v2.6 | WR de 24-25% con confluencia 0-1 |
 | Extension penalty cuadrática | v2.0 | Penaliza más fuerte entradas tarde |

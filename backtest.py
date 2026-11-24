@@ -59,7 +59,7 @@ from signals import (
 # construccion (mismo principio de fuente unica que signals.py aplica a los indicadores).
 # Se suman INDEX_ETFS/SECTOR_ETFS por la misma razon: son datos de clasificacion del
 # universo (no parametros de estrategia), asi que tambien deben tener una unica fuente.
-from alert import STOCK_NAMES, STOCK_GROUPS, INDEX_ETFS, SECTOR_ETFS
+from alert import STOCK_NAMES, STOCK_GROUPS, INDEX_ETFS, SECTOR_ETFS, BREADTH_PROXY_SYMBOLS
 # FIX (mejora institucional #1): motor de scoring compartido con alert.py — ver scoring.py
 # para el detalle de que reglas nunca habian llegado a este archivo (confluence floors,
 # bloqueo Supertrend+RS negativa, ETF RS floor, gate de ALERT_ETFS).
@@ -149,9 +149,28 @@ ALERT_ETFS               = os.getenv("ALERT_ETFS", "false").lower() == "true"
 # v2.7: Pullback Hardening (Backtest Fase B mostro pullback degradandose)
 # v2.10: pullback eliminado del sistema
 
-COOLDOWN_BARS       = int(os.getenv("BT_COOLDOWN_BARS", "5"))   # barras entre señales del mismo simbolo
-MAX_BARS_HOLD       = int(os.getenv("BT_MAX_BARS_HOLD", "15"))  # time-stop
+# v2.12: paridad con el vivo. Antes 5 barras de cooldown y time-stop de 15, mientras
+# alert.py usa COOLDOWN_HOURS=48 (~2 sesiones) y TRACKER_MAX_BARS_OPEN=20: el backtest
+# validaba un sistema distinto al que corre en produccion.
+# Los cooldowns del vivo son horas de reloj entre corridas, no barras: se replican como
+# dias calendario entre la fecha de corrida (barra i) de una alerta y la siguiente — asi
+# un fin de semana cuenta igual que en produccion.
+COOLDOWN_DAYS           = float(os.getenv("COOLDOWN_HOURS", "48")) / 24.0
+# El tracker detecta el stop en la primera corrida posterior al cierre de la barra de
+# salida (exit_date + 1), y el post-stop cooldown corre desde esa deteccion.
+POST_STOP_COOLDOWN_DAYS = float(os.getenv("POST_STOP_COOLDOWN_HOURS", "72")) / 24.0 + 1.0
+POST_STOP_SCORE_PENALTY = float(os.getenv("POST_STOP_SCORE_PENALTY", "1.0"))
+MAX_BARS_HOLD       = int(os.getenv("BT_MAX_BARS_HOLD", os.getenv("TRACKER_MAX_BARS_OPEN", "20")))  # time-stop
 REQUIRE_PLAYBOOK    = True
+
+# v2.12: filtros que antes existian solo en alert.py (ver CLAUDE.md, drift vivo vs backtest)
+EARNINGS_FILTER_ENABLED   = os.getenv("BT_EARNINGS_FILTER", "true").lower() == "true"
+EARNINGS_BUFFER_DAYS      = int(os.getenv("EARNINGS_BUFFER_DAYS", "5"))
+BREADTH_ENABLED           = os.getenv("BREADTH_ENABLED", "true").lower() == "true"
+BREADTH_MIN_PCT           = float(os.getenv("BREADTH_MIN_PCT", "50.0"))
+BREADTH_BLOCK_BELOW       = float(os.getenv("BREADTH_BLOCK_BELOW", "40.0"))
+CORRELATION_GUARD_ENABLED = os.getenv("CORRELATION_GUARD_ENABLED", "true").lower() == "true"
+GAP_BLOCK_PCT             = float(os.getenv("GAP_BLOCK_PCT", "2.0"))
 
 # Parametros del nucleo de scoring compartido — ver alert.py::_CORE_PARAMS (misma idea).
 _CORE_PARAMS = scoring.CoreParams(
@@ -190,6 +209,8 @@ _CORE_PARAMS = scoring.CoreParams(
     etf_rs_floor=ETF_RS_FLOOR,
     index_etfs=frozenset(INDEX_ETFS),
     sector_etfs=frozenset(SECTOR_ETFS),
+    breadth_min_pct=BREADTH_MIN_PCT,
+    breadth_block_below=BREADTH_BLOCK_BELOW,
 )
 
 # ---------------------------------------------------------------------------
@@ -274,6 +295,7 @@ def evaluate_bar(
     i: int,
     spy_closes: pd.Series,
     vix_proxy: float,
+    breadth_pct: Optional[float] = None,
 ) -> Optional[dict]:
     """
     Evalua la barra i usando datos hasta i inclusive.
@@ -314,6 +336,7 @@ def evaluate_bar(
 
     core = scoring.evaluate_core(
         symbol, group, last, prev, rs20, vix_proxy, recent_vols, _CORE_PARAMS,
+        breadth_pct=breadth_pct,
     )
 
     # ── Filtros finales (mismo gate que alert.py::StockSignal.should_alert) ────────
@@ -410,10 +433,15 @@ def simulate_trade(df: pd.DataFrame, signal_bar: int, entry: float, target: floa
     bars_open = 0
     mfe = 0.0   # max favorable excursion %
     mae = 0.0   # max adverse excursion %
-    exit_status = "expired"
-    exit_price  = float(df["Close"].iloc[min(entry_bar + max_bars - 1, n - 1)])
-    exit_date   = ""
-    exit_reason = f"time_stop_{max_bars}_bars"
+    last_bar    = min(entry_bar + max_bars - 1, n - 1)
+    # v2.12: si el historico termina antes del time-stop, el trade sigue ABIERTO (igual
+    # que el tracker en vivo) — antes se marcaba "expired" al ultimo Close disponible y
+    # entraba en la expectancy con un resultado parcial.
+    exit_status = "expired" if entry_bar + max_bars <= n else "open"
+    exit_price  = float(df["Close"].iloc[last_bar])
+    exit_date   = pd.Timestamp(df.index[last_bar]).date().isoformat() if exit_status == "expired" else ""
+    exit_reason = f"time_stop_{max_bars}_bars" if exit_status == "expired" else ""
+    exit_bar    = last_bar
 
     # Iterar desde entry_bar (no desde signal_bar) — sin look-ahead
     for j in range(entry_bar, min(entry_bar + max_bars, n)):
@@ -441,18 +469,21 @@ def simulate_trade(df: pd.DataFrame, signal_bar: int, entry: float, target: floa
             exit_price  = stop_fill
             exit_date   = bar_date.date().isoformat()
             exit_reason = "same_bar_both_stop_first"
+            exit_bar    = j
             break
         if hit_stop:
             exit_status = "hit_stop"
             exit_price  = stop_fill
             exit_date   = bar_date.date().isoformat()
             exit_reason = "stop_hit"
+            exit_bar    = j
             break
         if hit_target:
             exit_status = "hit_target"
             exit_price  = target
             exit_date   = bar_date.date().isoformat()
             exit_reason = "target_hit"
+            exit_bar    = j
             break
 
     days_open = bars_open  # aprox 1 barra = 1 dia calendario de trading
@@ -469,6 +500,7 @@ def simulate_trade(df: pd.DataFrame, signal_bar: int, entry: float, target: floa
         "mfe_pct":     round(mfe, 4),
         "mae_pct":     round(mae, 4),
         "real_entry":  round(real_entry, 4),  # entry efectivo (puede diferir del teorico por gap)
+        "exit_bar":    exit_bar,
     }
 
 
@@ -482,10 +514,13 @@ def backtest_symbol(
     spy_closes: pd.Series,
     vix_df: Optional[pd.DataFrame],
     start_date: Optional[pd.Timestamp],
+    breadth_map: Optional[dict[str, float]] = None,
+    earnings_dates: Optional[list] = None,
 ) -> list[dict]:
     df = add_indicators(df)
     trades: list[dict] = []
-    last_signal_bar = -999  # para cooldown entre señales
+    last_run_date = None             # fecha de corrida (barra i) de la ultima alerta — cooldown
+    stop_exit_bars: list[int] = []   # barras donde cerro por stop un trade previo (post-stop cooldown)
 
     # Alinear VIX
     vix_map: dict[str, float] = {}
@@ -496,7 +531,10 @@ def backtest_symbol(
                 d = d.tz_localize("UTC")
             vix_map[d.date().isoformat()] = float(row["Close"])
 
-    for i in range(220, len(df) - 1):
+    # Convencion de indices (igual que alert.py corriendo el dia i):
+    #   i-1 = barra de señal (ultima cerrada, alert.py iloc[-2])
+    #   i   = dia de la corrida; la orden se ejecuta a su Open (alert.py iloc[-1])
+    for i in range(220, len(df)):
         bar_dt = pd.Timestamp(df.index[i-1])
         if bar_dt.tzinfo is None:
             bar_dt = bar_dt.tz_localize("UTC")
@@ -505,19 +543,43 @@ def backtest_symbol(
         if start_date is not None and bar_dt < start_date:
             continue
 
-        # Cooldown entre señales del mismo simbolo
-        if (i - last_signal_bar) < COOLDOWN_BARS:
+        run_date = pd.Timestamp(df.index[i]).date()
+
+        # Cooldown entre alertas del mismo simbolo (alert.py: COOLDOWN_HOURS)
+        if last_run_date is not None and (run_date - last_run_date).days < COOLDOWN_DAYS:
+            continue
+
+        # v2.12: post-stop cooldown (alert.py: POST_STOP_COOLDOWN_HOURS). Solo cuentan
+        # stops ya ocurridos antes de la barra de señal — sin look-ahead sobre trades
+        # que todavia estan abiertos en esta fecha.
+        past_stops = [b for b in stop_exit_bars if b <= i - 1]
+        if past_stops:
+            last_stop_date = pd.Timestamp(df.index[max(past_stops)]).date()
+            if (run_date - last_stop_date).days < POST_STOP_COOLDOWN_DAYS:
+                continue
+
+        # v2.12: earnings (alert.py: get_earnings_info). Bloquea si el proximo reporte
+        # cae dentro de EARNINGS_BUFFER_DAYS dias calendario desde el dia de la corrida.
+        if earnings_dates and any(0 <= (e - run_date).days <= EARNINGS_BUFFER_DAYS for e in earnings_dates):
             continue
 
         # VIX proxy del dia
         vix_proxy = vix_map.get(bar_dt.date().isoformat(), 18.0)
+        breadth_pct = breadth_map.get(bar_dt.date().isoformat()) if breadth_map else None
 
-        sig = evaluate_bar(symbol, df, i, spy_closes, vix_proxy)
+        sig = evaluate_bar(symbol, df, i, spy_closes, vix_proxy, breadth_pct=breadth_pct)
         if sig is None:
             continue
 
-        # v2.9: Pasamos la barra de senal directamente. simulate_trade entra en signal_bar+1 (Open)
-        outcome = simulate_trade(df, i, sig["entry"], sig["target"], sig["stop"], sig.get("playbook", ""))
+        # alert.py: tras un stop previo exige MIN_SCORE + POST_STOP_SCORE_PENALTY
+        if past_stops and sig["score"] < MIN_SCORE + POST_STOP_SCORE_PENALTY:
+            continue
+
+        # v2.12 FIX: la barra de señal es i-1 (evaluate_bar usa last = df.iloc[i-1]).
+        # Antes se pasaba i, y simulate_trade entraba en i+1: un dia TARDE respecto del
+        # vivo (que compra el Open del dia siguiente a la señal), salteando la primera
+        # sesion del trade y midiendo el gap contra la apertura equivocada.
+        outcome = simulate_trade(df, i - 1, sig["entry"], sig["target"], sig["stop"], sig.get("playbook", ""))
 
         # v2.9: descartar trades sin entrada efectiva o con gap excesivo
         if outcome["status"] == "no_entry":
@@ -526,16 +588,13 @@ def backtest_symbol(
         # v2.9 Fix #8: filtro de gap aplicado al precio real de entrada
         real_entry = outcome.get("real_entry", sig["entry"])
         gap_pct = abs((real_entry - sig["entry"]) / max(sig["entry"], 1e-9)) * 100.0
-        if gap_pct > 2.0:  # mismo umbral que GAP_BLOCK_PCT del live
+        if gap_pct > GAP_BLOCK_PCT:  # mismo umbral que GAP_BLOCK_PCT del live
             continue
 
-        # v2.11: revalidar riesgo y R:R contra la entrada real. stop/target se calcularon
-        # sobre el cierre de la barra de senal; si el Open t+1 cae cerca (o debajo) del stop,
-        # o sube y comprime el R:R, el trade no se tomaria en la realidad.
-        real_risk = real_entry - sig["stop"]
-        if real_risk < MIN_ENTRY_RISK_ATR * sig["atr"]:
-            continue
-        if (sig["target"] - real_entry) / real_risk < MIN_RR:
+        # v2.11: revalidar riesgo y R:R contra la entrada real (mismo helper que alert.py)
+        if scoring.check_entry_at_open(
+            real_entry, sig["stop"], sig["target"], sig["atr"], MIN_RR, MIN_ENTRY_RISK_ATR,
+        ):
             continue
 
         # Ensamblar fila compatible con alerts_history.csv
@@ -594,7 +653,9 @@ def backtest_symbol(
         }
 
         trades.append(row)
-        last_signal_bar = i
+        last_run_date = run_date
+        if outcome["status"] == "hit_stop":
+            stop_exit_bars.append(outcome["exit_bar"])
 
     return trades
 
@@ -718,6 +779,64 @@ def build_report(df: pd.DataFrame, outdir: Path, input_years: int) -> str:
 # CLI
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# v2.12: filtros del vivo replicados historicamente
+# ---------------------------------------------------------------------------
+
+def build_breadth_map(years: int) -> dict[str, float]:
+    """% de ETFs sectoriales sobre su EMA200 por fecha — misma definicion que
+    alert.py::compute_market_breadth(), pero para cada barra historica."""
+    above_cols = []
+    for sym in BREADTH_PROXY_SYMBOLS:
+        df = fetch_data(sym, years=years)
+        if df is None or len(df) < 200:
+            continue
+        close = df["Close"]
+        ema200 = close.ewm(span=200, adjust=False).mean()
+        idx = [pd.Timestamp(t).date().isoformat() for t in df.index]
+        above_cols.append(pd.Series((close > ema200).values, index=idx, name=sym))
+    if not above_cols:
+        return {}
+    above = pd.concat(above_cols, axis=1)
+    pct = above.mean(axis=1, skipna=True) * 100.0
+    return {d: round(float(v), 1) for d, v in pct.items()}
+
+
+def fetch_earnings_dates(symbol: str) -> list:
+    """Fechas historicas de earnings (yfinance, requiere lxml). ETFs no reportan.
+    Si falla, se opera sin filtro para ese simbolo — mismo criterio que el vivo."""
+    if symbol in INDEX_ETFS or symbol in SECTOR_ETFS:
+        return []
+    try:
+        ed = yf.Ticker(symbol).get_earnings_dates(limit=28)
+        if ed is None or ed.empty:
+            return []
+        return sorted({pd.Timestamp(t).date() for t in ed.index})
+    except Exception as exc:
+        log.warning("%s: earnings historicos no disponibles (%s) — sin filtro de earnings", symbol, exc)
+        return []
+
+
+def apply_correlation_guard(trades_df: pd.DataFrame) -> pd.DataFrame:
+    """alert.py::CORRELATION_GUARD — una sola alerta por grupo por corrida, la de mayor
+    rank_score. Aproximacion: se aplica por barra de señal (no re-libera el cooldown del
+    simbolo descartado, que en vivo podria volver a alertar en la siguiente sesion)."""
+    if trades_df.empty:
+        return trades_df
+    score = pd.to_numeric(trades_df["score"], errors="coerce")
+    conf  = pd.to_numeric(trades_df["confluence_count"], errors="coerce").fillna(0)
+    rs    = pd.to_numeric(trades_df["rs20"], errors="coerce").fillna(0)
+    rank  = score * (1 + conf * 0.15) * (1 + rs.clip(lower=0) / 20)  # mismo rank_score que alert.py
+    sig_day = trades_df["trigger_candle_utc"].astype(str).str[:10]
+    keep = (
+        trades_df.assign(_rank=rank, _day=sig_day)
+        .sort_values("_rank", ascending=False)
+        .drop_duplicates(subset=["_day", "group"], keep="first")
+        .index
+    )
+    return trades_df.loc[sorted(keep)]
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Stock Sentinel Backtester")
     p.add_argument("--years",   type=int,   default=3,    help="Años de histórico (default: 3)")
@@ -763,6 +882,11 @@ def main() -> None:
         vix_df = None
         log.warning("VIX no disponible — se usara proxy 18.0")
 
+    breadth_map: dict[str, float] = {}
+    if BREADTH_ENABLED:
+        log.info("Calculando breadth historica (%s ETFs sectoriales)...", len(BREADTH_PROXY_SYMBOLS))
+        breadth_map = build_breadth_map(args.years + 1)
+
     all_trades: list[dict] = []
 
     for symbol in symbols:
@@ -772,7 +896,9 @@ def main() -> None:
             log.warning("%s: sin datos suficientes, omitido", symbol)
             continue
 
-        trades = backtest_symbol(symbol, df, spy_closes, vix_df, start_date)
+        earnings = fetch_earnings_dates(symbol) if EARNINGS_FILTER_ENABLED else []
+        trades = backtest_symbol(symbol, df, spy_closes, vix_df, start_date,
+                                 breadth_map=breadth_map, earnings_dates=earnings)
         log.info("  %s: %s señales generadas", symbol, len(trades))
         all_trades.extend(trades)
         time.sleep(0.5)
@@ -783,9 +909,20 @@ def main() -> None:
 
     # Guardar CSV de trades
     trades_df = pd.DataFrame(all_trades)
+    if CORRELATION_GUARD_ENABLED:
+        n_before = len(trades_df)
+        trades_df = apply_correlation_guard(trades_df).reset_index(drop=True)
+        log.info("Correlation guard: %s -> %s trades", n_before, len(trades_df))
     trades_path = outdir / "backtest_trades.csv"
     trades_df.to_csv(trades_path, index=False)
     log.info("Trades guardados: %s (%s filas)", trades_path, len(trades_df))
+
+    # v2.12: los trades aun abiertos al final del historico quedan en el CSV (igual que el
+    # tracker en vivo) pero no entran en metricas — su resultado todavia no existe.
+    n_open = int(trades_df["status"].eq("open").sum())
+    if n_open:
+        log.info("%s trades siguen abiertos al cierre del historico — excluidos de metricas", n_open)
+    trades_df = trades_df[trades_df["status"] != "open"].reset_index(drop=True)
 
     # Reporte
     report_md = build_report(trades_df, outdir, args.years)
