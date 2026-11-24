@@ -8,7 +8,7 @@
 ## 1. Identidad del Proyecto
 
 **Nombre:** Stock Sentinel Bot — RGTNYSE  
-**Versión activa:** v2.10 (breakout-only)  
+**Versión activa:** v2.11 (breakout-only)  
 **Objetivo:** Escáner automatizado de acciones con análisis técnico multi-capa, alertas vía Telegram y backtesting reproducible. Corre de forma autónoma en GitHub Actions dos veces al día durante la sesión de NY.
 
 **Stack:**
@@ -83,7 +83,7 @@ analyze_alerts_history.py ← Análisis de performance en vivo
 - Cualquier nuevo indicador debe pasar validación en `validate_ohlcv()` (mínimo 220 barras para warm-up).
 
 **Áreas de riesgo estadístico:**
-- Confluence=5 (5/5 señales): backtested a 0% WR, -0.543R. No aumentar el bonus por confluencia alta sin revalidar.
+- Confluence=5 (5/5 señales): backtested a 25% WR, -0.014R (n=8, v2.11). No aumentar el bonus por confluencia alta sin revalidar.
 - Pullback playbook: eliminado en v2.10 por expectancy de 0.009R (21 trades — muestra insuficiente para edge real). Si se reactiva, exigir mínimo 100 trades en backtest.
 - Extension penalty: cuadrática por diseño (no lineal). No simplificar a lineal sin testear impacto en distribución de R.
 
@@ -230,16 +230,22 @@ Max hold:            20 barras (TRACKER_MAX_BARS_OPEN)
 
 ---
 
-## 6. Performance Actual (v2.10 — Backtest 3 años)
+## 6. Performance Actual (v2.11 — Backtest 3 años, corrida 2026-11-24)
 
 | Métrica | Valor |
 |---|---|
-| Expectancy | 0.269R/trade (post-costos) |
-| Win Rate | ~45-50% |
-| Trades/año | ~80-100 |
-| Max Drawdown | ~20-25% |
-| Confluencia=4: WR | 68.4%, 0.997R ← señal de mayor calidad |
-| Confluencia=5: WR | 0%, -0.543R ← evitar (chasing) |
+| Expectancy | 0.346R/trade (0.302R post-costos), n=136 |
+| Win Rate | 33.1% hit target / 48.5% con R>0 |
+| Trades/año | ~45 |
+| Max Drawdown | -6.5% (Monte Carlo p95: -14.9%) |
+| Confluencia=4: WR | 64.3%, 1.56R (n=14) ← señal de mayor calidad |
+| Confluencia=5: WR | 25%, -0.014R (n=8) ← evitar (chasing) |
+| Confluencia=2 | 0.21R (n=29) — no justifica subir el hard floor a 3 |
+| En vivo (abr–nov 2026) | -0.03R post-costos, n=63 — ver nota de drift |
+
+**v2.11 — fix de entrada real en backtest:** el stop/target se calculan sobre el cierre de la barra de señal pero la entrada es el Open t+1. Un gap a la baja ≤2% podía dejar riesgo ~0 o negativo (XLP 2024-08-02: +21R) e inflar la expectancy (0.508R → 0.346R al corregir). Ahora `backtest_symbol()` descarta el trade si `real_entry - stop < MIN_ENTRY_RISK_ATR × ATR` o si el R:R real < `MIN_RR`, y `simulate_trade()` ejecuta el stop al Open cuando hay gap-through (R puede ser < -1).
+
+**Drift backtest vs vivo (pendiente):** en el mismo periodo el backtest genera ~9 trades y el vivo 63; 50 de los 63 salen de la corrida de 10:12 AM sobre la vela diaria aún abierta, que el backtest nunca simula. Además el backtest no aplica el bloqueo por earnings.
 | Pullback (eliminado) | 0.009R — sin edge estadístico |
 
 **Costos incluidos en backtest:**
@@ -272,6 +278,7 @@ Ante cualquier requerimiento de cambio, aplicar este orden:
 # Scoring
 MIN_SCORE=5.8
 MIN_RR=0.8
+MIN_ENTRY_RISK_ATR=0.5   # backtest: riesgo mínimo vs entrada real (Open t+1)
 COOLDOWN_HOURS=48
 POST_STOP_COOLDOWN_HOURS=72
 

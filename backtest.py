@@ -84,6 +84,10 @@ log = logging.getLogger("backtest")
 # ---------------------------------------------------------------------------
 MIN_SCORE           = float(os.getenv("MIN_SCORE", "5.8"))
 MIN_RR              = float(os.getenv("MIN_RR", "0.8"))
+# v2.11: riesgo minimo (en ATR) medido contra la entrada REAL (Open t+1). Un gap a la baja
+# dentro del umbral del gap filter puede dejar el Open pegado al stop (riesgo ~0) e inflar
+# el R de cualquier trade ganador (caso XLP 2024-08-02: riesgo 0.15 -> +21R).
+MIN_ENTRY_RISK_ATR  = float(os.getenv("MIN_ENTRY_RISK_ATR", "0.5"))
 SETUP_RSI_MIN       = float(os.getenv("SETUP_RSI_MIN", "45"))
 SETUP_RSI_MAX       = float(os.getenv("SETUP_RSI_MAX", "66"))
 BREAKOUT_RSI_MAX    = float(os.getenv("BREAKOUT_RSI_MAX", "76"))
@@ -413,9 +417,13 @@ def simulate_trade(df: pd.DataFrame, signal_bar: int, entry: float, target: floa
 
     # Iterar desde entry_bar (no desde signal_bar) — sin look-ahead
     for j in range(entry_bar, min(entry_bar + max_bars, n)):
+        bar_open = float(df["Open"].iloc[j])
         bar_high = float(df["High"].iloc[j])
         bar_low  = float(df["Low"].iloc[j])
         bars_open += 1
+        # v2.11: si la barra abre por debajo del stop (gap-through), la orden stop se
+        # ejecuta al Open, no al nivel del stop. El target se deja en su nivel (conservador).
+        stop_fill = min(stop, bar_open)
 
         # MFE/MAE calculados sobre real_entry (no entry teorico)
         mfe = max(mfe, (bar_high - real_entry) / max(real_entry, 1e-9) * 100)
@@ -430,13 +438,13 @@ def simulate_trade(df: pd.DataFrame, signal_bar: int, entry: float, target: floa
 
         if hit_stop and hit_target:
             exit_status = "hit_stop"
-            exit_price  = stop
+            exit_price  = stop_fill
             exit_date   = bar_date.date().isoformat()
             exit_reason = "same_bar_both_stop_first"
             break
         if hit_stop:
             exit_status = "hit_stop"
-            exit_price  = stop
+            exit_price  = stop_fill
             exit_date   = bar_date.date().isoformat()
             exit_reason = "stop_hit"
             break
@@ -519,6 +527,15 @@ def backtest_symbol(
         real_entry = outcome.get("real_entry", sig["entry"])
         gap_pct = abs((real_entry - sig["entry"]) / max(sig["entry"], 1e-9)) * 100.0
         if gap_pct > 2.0:  # mismo umbral que GAP_BLOCK_PCT del live
+            continue
+
+        # v2.11: revalidar riesgo y R:R contra la entrada real. stop/target se calcularon
+        # sobre el cierre de la barra de senal; si el Open t+1 cae cerca (o debajo) del stop,
+        # o sube y comprime el R:R, el trade no se tomaria en la realidad.
+        real_risk = real_entry - sig["stop"]
+        if real_risk < MIN_ENTRY_RISK_ATR * sig["atr"]:
+            continue
+        if (sig["target"] - real_entry) / real_risk < MIN_RR:
             continue
 
         # Ensamblar fila compatible con alerts_history.csv
@@ -634,7 +651,7 @@ def build_report(df: pd.DataFrame, outdir: Path, input_years: int) -> str:
     # teorico y la apertura real se colaba sin corregir en el lado ganador de la distribucion,
     # inflando/desinflando arbitrariamente expectancy, Monte Carlo y equity curve. exit_price
     # ya contiene el precio de salida real para cualquier status, asi que una sola formula
-    # basta: para hit_stop, exit_price siempre iguala a stop, dando -1.0 automaticamente.
+    # basta: para hit_stop, exit_price es el stop (-1.0R) o el Open si hubo gap-through (< -1R).
     df["realized_r"] = (
         (pd.to_numeric(df["exit_price"], errors="coerce") - pd.to_numeric(df["price"], errors="coerce"))
         / (df["risk_dollars"] + 1e-9)
