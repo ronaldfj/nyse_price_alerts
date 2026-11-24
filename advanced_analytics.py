@@ -105,6 +105,18 @@ def load_trades(path: Path) -> pd.DataFrame:
     return df
 
 
+def filter_start_date(df: pd.DataFrame, start_date: str) -> pd.DataFrame:
+    """v2.12: ventana de evaluacion por fecha de la vela de señal (fallback timestamp_utc).
+    Compartido por advanced_analytics y compare_playbooks."""
+    if not start_date:
+        return df
+    col = "trigger_candle_utc" if "trigger_candle_utc" in df.columns else "timestamp_utc"
+    sig_dt = pd.to_datetime(df[col], utc=True, errors="coerce")
+    out = df[sig_dt >= pd.Timestamp(start_date, tz="UTC")].reset_index(drop=True)
+    log.info("Filtro start-date >= %s: %s/%s trades", start_date, len(out), len(df))
+    return out
+
+
 # ── Calculos base ──────────────────────────────────────────────────────────
 def compute_realized_r(df: pd.DataFrame) -> pd.Series:
     """R realizado por trade: (exit_price - price) / (price - stop), uniforme
@@ -498,12 +510,7 @@ def main() -> None:
 
     # v2.12: ventana de evaluacion por fecha de la vela de señal
     if settings.start_date:
-        col = "trigger_candle_utc" if "trigger_candle_utc" in df.columns else "timestamp_utc"
-        start = pd.Timestamp(settings.start_date, tz="UTC")
-        sig_dt = pd.to_datetime(df[col], utc=True, errors="coerce")
-        before = len(df)
-        df = df[sig_dt >= start].reset_index(drop=True)
-        log.info("Filtro start-date >= %s: %s/%s trades", settings.start_date, len(df), before)
+        df = filter_start_date(df, settings.start_date)
         if df.empty:
             log.warning("Sin trades desde %s — no se puede analizar", settings.start_date)
             return

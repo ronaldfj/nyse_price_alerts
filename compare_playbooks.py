@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from advanced_analytics import (
     load_trades, compute_realized_r, apply_costs, build_equity_curve,
     monte_carlo_reorder, distribution_summary, distribution_buckets,
-    rolling_metrics, time_exposure_stats, Settings,
+    rolling_metrics, time_exposure_stats, Settings, filter_start_date,
 )
 
 
@@ -118,6 +118,8 @@ def write_comparison_report(results: list[dict], outdir: Path, settings: Setting
     lines = []
     lines.append("# Comparacion de Playbooks — Fase B")
     lines.append("")
+    if settings.start_date:
+        lines.append(f"- Desde (vela de señal): **{settings.start_date}**")
     lines.append(f"- Capital inicial: **${settings.initial_capital:,.0f}**")
     lines.append(f"- Riesgo por trade: **{settings.risk_per_trade_pct}%**")
     lines.append(f"- Costos: comision **${settings.commission_per_trade}** + slippage **{settings.slippage_pct}%/lado**")
@@ -211,6 +213,8 @@ def parse_args() -> Settings:
     p.add_argument("--slippage-pct", type=float, default=0.05)
     p.add_argument("--mc-runs", type=int, default=2000)
     p.add_argument("--rolling-window", type=int, default=30)
+    p.add_argument("--start-date", type=str, default="",
+                   help="Solo trades con vela de señal >= YYYY-MM-DD")
     args = p.parse_args()
 
     return Settings(
@@ -222,6 +226,7 @@ def parse_args() -> Settings:
         slippage_pct=args.slippage_pct,
         mc_runs=args.mc_runs,
         rolling_window_trades=args.rolling_window,
+        start_date=args.start_date.strip(),
     )
 
 
@@ -231,6 +236,7 @@ def main() -> None:
 
     log.info("Cargando trades...")
     df_all = load_trades(settings.input_path)
+    df_all = filter_start_date(df_all, settings.start_date)
     if df_all.empty:
         log.error("Sin trades para analizar")
         return
