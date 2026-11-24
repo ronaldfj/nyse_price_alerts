@@ -2,13 +2,21 @@ name: Stock Sentinel Alerts
 
 on:
   schedule:
-    # 10:12 AM y 3:12 PM America/New_York — lunes a viernes
-    - cron: "12 10,15 * * 1-5"
+    # v2.12: señal al cierre, entrada al Open siguiente. 16:30 ET (tras el cierre) y
+    # 19:30 ET de respaldo — GitHub retrasa/descarta schedules; la deduplicacion por
+    # setup_hash evita alertas repetidas. Cualquier corrida entre el cierre y las 09:30
+    # ET del dia siguiente es valida.
+    - cron: "30 16,19 * * 1-5"
       timezone: "America/New_York"
   workflow_dispatch:
 
 permissions:
   contents: write
+
+env:
+  # v2.12: alertas en vivo anteriores a la unificacion de motores (2026-07-04/10) no son
+  # comparables con el backtest — se excluyen de los reportes de performance en vivo.
+  LIVE_EVAL_START: "2026-07-10"
 
 concurrency:
   group: stock-sentinel
@@ -98,6 +106,7 @@ jobs:
           RISK_PER_TRADE_PCT: "1.0"
           GAP_BLOCK_PCT: "2.0"
           MIN_ENTRY_RISK_ATR: "0.5"  # v2.11: riesgo minimo vs Open real (scoring.check_entry_at_open)
+          SESSION_CLOSE_BUFFER_MIN: "15"  # v2.12: la barra del dia cuenta como cerrada desde 16:15 ET
           GAP_FILTER_ENABLED: "true"
           CORRELATION_GUARD_ENABLED: "true"
           BATCH_DOWNLOAD_ENABLED: "true"
@@ -113,7 +122,7 @@ jobs:
       - name: Analizar histórico
         if: always()
         run: |
-          python analyze_alerts_history.py --input alerts_history.csv
+          python analyze_alerts_history.py --input alerts_history.csv --start-date "$LIVE_EVAL_START"
           ls -la
           ls -la analysis_output || true
 
@@ -226,6 +235,7 @@ jobs:
           if [ -s alerts_history.csv ]; then
             python advanced_analytics.py \
               --input alerts_history.csv \
+              --start-date "$LIVE_EVAL_START" \
               --outdir backtest_output/analytics_live \
               --capital 10000 \
               --mc-runs 1000 || echo "Pocos trades para analytics live, omitido"

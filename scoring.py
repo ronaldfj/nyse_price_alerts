@@ -576,23 +576,45 @@ def passes_final_filters(
     )
 
 
-# ── Revalidacion de la entrada real (Open t+1) ───────────────────────────────
-def check_entry_at_open(
-    real_entry: float,
+# ── Revalidacion de la entrada real (Open de la sesion siguiente) ────────────
+def entry_open_range(
+    signal_close: float,
     stop: float,
     target: float,
     atr: float,
     min_rr: float,
     min_risk_atr: float,
-) -> Optional[str]:
-    """v2.11: stop/target se calculan sobre el cierre de la barra de señal, pero la
-    orden se ejecuta al Open siguiente. Si ese Open cae cerca (o debajo) del stop, el
-    riesgo real tiende a 0 y el R de cualquier ganador se infla; si sube, el R:R real
-    se comprime por debajo del minimo. Compartido por backtest.py (al simular la
-    entrada) y alert.py (al emitir la alerta, cuando el Open del dia ya existe), para
-    que vivo y backtest tomen exactamente los mismos trades.
+    gap_block_pct: float,
+) -> tuple[float, float]:
+    """v2.12: rango de Open de la sesion siguiente dentro del cual el trade es valido.
+    stop/target se calculan al cierre de la barra de señal, pero la orden se ejecuta al
+    Open siguiente. El trade se cancela si ese Open:
+      - abre con gap > gap_block_pct vs el cierre de señal (en cualquier direccion),
+      - deja riesgo < min_risk_atr * ATR (Open pegado al stop -> R inflado),
+      - comprime el R:R real bajo min_rr  [(T-o)/(o-S) >= m  <=>  o <= (T+m*S)/(1+m)].
+    Retorna (lo, hi); si lo > hi no existe Open valido."""
+    lo = max(signal_close * (1 - gap_block_pct / 100.0), stop + min_risk_atr * atr)
+    hi = min(signal_close * (1 + gap_block_pct / 100.0), (target + min_rr * stop) / (1 + min_rr))
+    return lo, hi
 
+
+def check_entry_at_open(
+    real_entry: float,
+    signal_close: float,
+    stop: float,
+    target: float,
+    atr: float,
+    min_rr: float,
+    min_risk_atr: float,
+    gap_block_pct: float,
+) -> Optional[str]:
+    """Valida el Open real contra entry_open_range. Fuente unica para backtest.py
+    (simulacion) y el tracker de alert.py (que cancela la alerta si el Open real cae
+    fuera de rango), para que vivo y backtest tomen exactamente los mismos trades.
     Retorna None si la entrada es valida, o el motivo del rechazo."""
+    gap_pct = abs(real_entry / max(signal_close, 1e-9) - 1.0) * 100.0
+    if gap_pct > gap_block_pct:
+        return f"Gap al Open {gap_pct:.2f}% > {gap_block_pct:.1f}%"
     risk = real_entry - stop
     if risk < min_risk_atr * atr:
         return (

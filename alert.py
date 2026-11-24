@@ -123,7 +123,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Optional
@@ -249,6 +249,13 @@ MIN_SCORE = float(os.getenv("MIN_SCORE", "5.8"))
 MIN_RR = float(os.getenv("MIN_RR", "1.6"))
 # v2.11: riesgo minimo (en ATR) contra el Open real — ver scoring.check_entry_at_open
 MIN_ENTRY_RISK_ATR = float(os.getenv("MIN_ENTRY_RISK_ATR", "0.5"))
+# v2.12: esquema "señal al cierre, entrada al Open siguiente". La barra del dia se
+# considera cerrada recien SESSION_CLOSE_BUFFER_MIN minutos despues de las 16:00 ET.
+MARKET_TZ = ZoneInfo("America/New_York")
+SESSION_CLOSE_BUFFER_MIN = int(os.getenv("SESSION_CLOSE_BUFFER_MIN", "15"))
+# Solo para depurar (p.ej. dry-run en horario de mercado): escanear aunque la sesion
+# de entrada de la ultima señal ya haya abierto.
+FORCE_SCAN_DURING_SESSION = os.getenv("FORCE_SCAN_DURING_SESSION", "false").lower() == "true"
 COOLDOWN = int(os.getenv("COOLDOWN_HOURS", "48")) * 3600
 EARNINGS_BUFFER_DAYS = int(os.getenv("EARNINGS_BUFFER_DAYS", "5"))
 VIX_BLOCK_LEVEL = float(os.getenv("VIX_BLOCK_LEVEL", "30.0"))
@@ -488,6 +495,9 @@ class StockSignal:
     risk_usd: float = 0.0
     trailing_stop_initial: float = 0.0
     rank_score: float = 0.0  # para ordenar multiples alertas
+    # v2.12: rango de Open valido en la sesion de entrada (fuera de rango -> cancelado)
+    entry_open_lo: float = 0.0
+    entry_open_hi: float = 0.0
 
     @property
     def should_alert(self) -> bool:
@@ -897,19 +907,22 @@ def should_suppress_by_history(sig: StockSignal, rows: list[dict[str, str]], now
 
 
 
-def _prepare_closed_tracker_bars(df: Optional[pd.DataFrame], opened_dt: datetime) -> pd.DataFrame:
-    if df is None or df.empty:
+def _prepare_closed_tracker_bars(
+    df: Optional[pd.DataFrame], opened_dt: datetime, signal_date=None,
+) -> pd.DataFrame:
+    """Barras CERRADAS del trade. v2.12: el trade empieza en la sesion siguiente a la
+    barra de señal (entrada al Open), igual que backtest.simulate_trade. Filas viejas
+    sin trigger_candle_utc usan la fecha de la alerta (comportamiento anterior)."""
+    closed_df = closed_bars(df)
+    if closed_df is None or closed_df.empty:
         return pd.DataFrame()
 
-    closed_df = df.copy()
-    if len(closed_df) >= 2:
-        closed_df = closed_df.iloc[:-1]
-
-    if closed_df.empty:
-        return pd.DataFrame()
-
-    opened_date = opened_dt.date()
-    mask = pd.Index([ts.date() >= opened_date for ts in closed_df.index])
+    dates = [_bar_date_ny(ts) for ts in closed_df.index]
+    if signal_date is not None:
+        mask = pd.Index([d > signal_date for d in dates])
+    else:
+        opened_date = opened_dt.astimezone(MARKET_TZ).date()
+        mask = pd.Index([d >= opened_date for d in dates])
     return closed_df.loc[mask].copy()
 
 
@@ -921,6 +934,7 @@ def update_alert_history_tracker() -> dict[str, int]:
         "expired": 0,
         "still_open": 0,
         "invalid": 0,
+        "cancelled": 0,
     }
 
     if not TRACKER_ENABLED:
@@ -936,7 +950,7 @@ def update_alert_history_tracker() -> dict[str, int]:
 
     for row in rows:
         status = (row.get("status") or "open").strip().lower()
-        if status in {"hit_target", "hit_stop", "expired"}:
+        if status in {"hit_target", "hit_stop", "expired", "cancelled"}:
             continue
 
         stats["open_checked"] += 1
@@ -957,7 +971,9 @@ def update_alert_history_tracker() -> dict[str, int]:
         if symbol not in data_cache:
             data_cache[symbol] = fetch_data(symbol)
 
-        trade_df = _prepare_closed_tracker_bars(data_cache[symbol], opened_dt)
+        signal_dt = _parse_iso_datetime(row.get("trigger_candle_utc", ""))
+        signal_date = signal_dt.astimezone(MARKET_TZ).date() if signal_dt else None
+        trade_df = _prepare_closed_tracker_bars(data_cache[symbol], opened_dt, signal_date)
         if trade_df.empty:
             row["status"] = "open"
             row["last_checked_utc"] = now_utc
@@ -980,6 +996,21 @@ def update_alert_history_tracker() -> dict[str, int]:
         if real_entry <= 0:
             real_entry = float(trade_df["Open"].iloc[0])
             row["real_entry"] = _fmt_csv_number(real_entry)
+            # v2.12: validar el Open real con el mismo helper que backtest.py. Solo al
+            # fijar real_entry por primera vez (filas viejas ya fijadas no se reabren).
+            reject = scoring.check_entry_at_open(
+                real_entry, entry, stop, target, _safe_float(row.get("atr")),
+                MIN_RR, MIN_ENTRY_RISK_ATR, _gap_block_pct(),
+            )
+            if reject:
+                row["status"] = "cancelled"
+                row["last_checked_utc"] = now_utc
+                row["exit_reason"] = f"entry_cancelled: {reject}"
+                row["closed_utc"] = now_utc
+                stats["cancelled"] += 1
+                changed = True
+                log.info("⛔ %s cancelado al Open %.2f — %s", symbol, real_entry, reject)
+                continue
 
         highs = trade_df["High"].astype(float)
         lows = trade_df["Low"].astype(float)
@@ -1152,29 +1183,32 @@ def get_earnings_info(symbol: str) -> tuple[Optional[str], bool]:
     # la obtencion de datos; distingue "API fallo" (reintentable, cuenta como failure) de
     # "no hay earnings programados" (respuesta valida, no es una falla).
     last_exc: Optional[Exception] = None
-    earnings_date = None
+    candidates: list = []
     for attempt in range(1, 4):
         try:
             ticker = yf.Ticker(symbol)
-            earnings_date = None
+            candidates = []
 
+            # v2.12: varias fechas, no limit=1. La noche del reporte Yahoo puede devolver
+            # ya el trimestre siguiente como "proxima" fecha, y la señal del mismo dia del
+            # reporte pasaba el filtro (GS 07-14, MA 07-30, XOM 10-30: los 3 en -1R).
             try:
-                earnings_df = ticker.get_earnings_dates(limit=1)
+                earnings_df = ticker.get_earnings_dates(limit=8)
                 if earnings_df is not None and not earnings_df.empty:
-                    earnings_date = earnings_df.index[0]
+                    candidates.extend(list(earnings_df.index))
             except Exception:
-                earnings_df = None
+                pass
 
-            if earnings_date is None:
+            if not candidates:
                 cal = ticker.calendar
                 if isinstance(cal, dict):
-                    candidate = cal.get("Earnings Date")
-                    if isinstance(candidate, list) and candidate:
-                        earnings_date = candidate[0]
-                    elif candidate is not None:
-                        earnings_date = candidate
+                    cand = cal.get("Earnings Date")
+                    if isinstance(cand, list):
+                        candidates.extend(cand)
+                    elif cand is not None:
+                        candidates.append(cand)
                 elif isinstance(cal, pd.DataFrame) and not cal.empty and "Earnings Date" in cal.index:
-                    earnings_date = cal.loc["Earnings Date"].iloc[0]
+                    candidates.extend(list(cal.loc["Earnings Date"].values))
 
             last_exc = None
             break
@@ -1191,28 +1225,26 @@ def get_earnings_info(symbol: str) -> tuple[Optional[str], bool]:
         EARNINGS_FAILURES.add(symbol)
         return None, False
 
-    if earnings_date is None:
+    # Fechas de sesion (NY). Regla identica a backtest.py: bloquea si algun reporte cae
+    # entre HOY (incluido) y EARNINGS_BUFFER_DAYS dias calendario adelante.
+    dates = set()
+    for c in candidates:
+        try:
+            t = pd.Timestamp(c)
+        except Exception:
+            continue
+        if pd.isna(t):
+            continue
+        dates.add(t.tz_convert(MARKET_TZ).date() if t.tzinfo is not None else t.date())
+    if not dates:
         return None, False
 
-    if hasattr(earnings_date, "to_pydatetime"):
-        earnings_dt = earnings_date.to_pydatetime()
-    elif isinstance(earnings_date, datetime):
-        earnings_dt = earnings_date
-    else:
-        return str(earnings_date), False
-
-    now = datetime.now(timezone.utc)
-    if earnings_dt.tzinfo is None:
-        earnings_dt = earnings_dt.replace(tzinfo=timezone.utc)
-
-    # v2.12: comparar por DIA CALENDARIO (fecha de NY), no por segundos. Con segundos,
-    # un reporte after-hours (16:00 ET) a 5 dias de una corrida de la tarde quedaba en
-    # 5.0x dias y pasaba el filtro (NOW 2026-10-23 -> earnings 10-28: -3.5R por el gap).
-    # El backtest usa esta misma regla, por dia.
-    ny = ZoneInfo("America/New_York")
-    days_diff = abs((earnings_dt.astimezone(ny).date() - now.astimezone(ny).date()).days)
-    date_str = earnings_dt.strftime("%Y-%m-%d")
-    return date_str, days_diff <= EARNINGS_BUFFER_DAYS
+    today = datetime.now(timezone.utc).astimezone(MARKET_TZ).date()
+    near = sorted(d for d in dates if 0 <= (d - today).days <= EARNINGS_BUFFER_DAYS)
+    if near:
+        return near[0].isoformat(), True
+    upcoming = sorted(d for d in dates if d >= today)
+    return (upcoming[0].isoformat() if upcoming else None), False
 
 
 def prefetch_earnings_parallel(symbols: list[str], max_workers: int = 10) -> None:
@@ -1316,6 +1348,34 @@ def prefetch_all_data(symbols: list[str]) -> None:
              elapsed, len(_DATA_CACHE), len(symbols))
 
 
+def _bar_date_ny(ts) -> "datetime.date":
+    """Fecha de sesion (NY) de un indice de yfinance: tz-aware (history) o tz-naive (batch)."""
+    t = pd.Timestamp(ts)
+    if t.tzinfo is not None:
+        t = t.tz_convert(MARKET_TZ)
+    return t.date()
+
+
+def closed_bars(df: Optional[pd.DataFrame], now: Optional[datetime] = None) -> Optional[pd.DataFrame]:
+    """v2.12: devuelve solo barras diarias CERRADAS. Descarta la ultima si es la sesion
+    de hoy y todavia no paso el cierre (+ buffer). Asi la señal siempre es la ultima
+    barra completa sin importar a que hora corra el cron (GitHub Actions retrasa los
+    schedules horas): tras el cierre es la de hoy; antes de la apertura, la de ayer."""
+    if df is None or df.empty:
+        return df
+    now_ny = (now or datetime.now(timezone.utc)).astimezone(MARKET_TZ)
+    cutoff = now_ny.replace(hour=16, minute=0, second=0, microsecond=0) + timedelta(minutes=SESSION_CLOSE_BUFFER_MIN)
+    last_date = _bar_date_ny(df.index[-1])
+    if last_date > now_ny.date() or (last_date == now_ny.date() and now_ny < cutoff):
+        return df.iloc[:-1]
+    return df
+
+
+def _gap_block_pct() -> float:
+    """GAP_BLOCK_PCT efectivo (sin limite si GAP_FILTER_ENABLED=false)."""
+    return GAP_BLOCK_PCT if GAP_FILTER_ENABLED else float("inf")
+
+
 def fetch_data(symbol: str) -> Optional[pd.DataFrame]:
     """Devuelve datos del cache o hace descarga individual como fallback."""
     if symbol in _DATA_CACHE:
@@ -1351,7 +1411,8 @@ def fetch_data(symbol: str) -> Optional[pd.DataFrame]:
 # ── Helpers cuantitativos ─────────────────────────────────────────────────────
 def compute_relative_strength(df: pd.DataFrame, spy_df: Optional[pd.DataFrame], symbol: str = "") -> float:
     """v2.9: delega al modulo signals.py — unica fuente de verdad."""
-    return _signals_compute_rs(df, spy_df, lookback=RS_LOOKBACK, symbol=symbol)
+    # v2.12: df y spy_df llegan recortados a barras cerradas -> la señal es iloc[-1]
+    return _signals_compute_rs(df, spy_df, lookback=RS_LOOKBACK, symbol=symbol, signal_offset=1)
 
 
 # ── v2.5 #6: Breadth filter ──────────────────────────────────────────────────
@@ -1364,12 +1425,12 @@ def compute_market_breadth() -> Optional[float]:
     above = 0
     total = 0
     for sym in BREADTH_PROXY_SYMBOLS:
-        df = fetch_data(sym)
+        df = closed_bars(fetch_data(sym))
         if df is None or len(df) < 200:
             continue
         ema200 = df["Close"].ewm(span=200, adjust=False).mean()
-        last_close = float(df["Close"].iloc[-2])
-        last_ema   = float(ema200.iloc[-2])
+        last_close = float(df["Close"].iloc[-1])   # v2.12: ultima barra cerrada
+        last_ema   = float(ema200.iloc[-1])
         if last_close > last_ema:
             above += 1
         total += 1
@@ -1395,16 +1456,10 @@ def compute_position_size(entry: float, stop: float, playbook: str = "breakout")
 
 
 # ── v2.5 #8: Gap filter ──────────────────────────────────────────────────────
-def detect_overnight_gap(df: pd.DataFrame) -> tuple[float, bool]:
-    """Detecta gap entre cierre de N-1 y apertura de N (ultima barra).
-    Returns (gap_pct, blocked)."""
-    if not GAP_FILTER_ENABLED or len(df) < 2:
-        return 0.0, False
-    prev_close = float(df["Close"].iloc[-2])
-    today_open = float(df["Open"].iloc[-1])
-    gap_pct = abs((today_open - prev_close) / max(prev_close, 1e-9)) * 100.0
-    blocked = gap_pct > GAP_BLOCK_PCT
-    return round(gap_pct, 2), blocked
+# v2.12: el gap ya no se evalua al emitir la alerta (el Open de la sesion de entrada
+# todavia no existe). Se informa el rango de Open valido en la alerta y el tracker
+# cancela el trade si el Open real cae fuera — ver scoring.entry_open_range /
+# check_entry_at_open y update_alert_history_tracker().
 
 
 # ── v2.5 #11: Trailing stop sugerido ─────────────────────────────────────────
@@ -1421,21 +1476,24 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         return None
 
     earnings_date_str, earnings_near = get_earnings_info(symbol)
-    df = add_indicators(df)
+    # v2.12: solo barras cerradas -> la barra de señal es la ultima (iloc[-1]) y la
+    # entrada es el Open de la sesion siguiente (misma convencion que backtest.py).
+    df = add_indicators(closed_bars(df))
+    spy_df = closed_bars(spy_df)
 
     if len(df) < max(220, RS_LOOKBACK + 25):
         return None
 
-    last = df.iloc[-2]
-    prev = df.iloc[-3]
-    trigger_candle_utc = _normalize_dt_text(_bar_timestamp_to_utc(df.index[-2]))
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    trigger_candle_utc = _normalize_dt_text(_bar_timestamp_to_utc(df.index[-1]))
 
     name = STOCK_NAMES.get(symbol, symbol)
     group = STOCK_GROUPS.get(symbol, "Other")
 
     entry = float(last["Close"])
     rs20 = 0.0 if symbol == "SPY" else compute_relative_strength(df, spy_df, symbol=symbol)
-    recent_vols = df["Volume"].iloc[-(VOLUME_PROFILE_LOOKBACK + 1):-1].values
+    recent_vols = df["Volume"].iloc[-VOLUME_PROFILE_LOOKBACK:].values  # incluye la barra de señal
 
     # FIX (mejora institucional #1): todo el bloque de scoring tecnico (regime/setup/
     # trigger/confluencia/playbook/stop-tp-rr) vivia duplicado aca y en
@@ -1458,20 +1516,15 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
     if earnings_near and earnings_date_str:
         blocked.append(f"Earnings en {earnings_date_str} (±{EARNINGS_BUFFER_DAYS} días)")
 
-    # v2.5 #8: gap filter — si gap intraday >GAP_BLOCK_PCT, el setup tecnico es invalido
-    gap_pct, gap_blocked = detect_overnight_gap(df)
-    if gap_blocked:
-        blocked.append(f"Gap overnight {gap_pct:.1f}% > {GAP_BLOCK_PCT}% — entry invalida")
-
-    # v2.11: revalidar riesgo y R:R contra el Open de hoy (la entrada real), con el mismo
-    # helper que usa backtest.py — asi una alerta emitida es exactamente un trade que el
-    # backtest tambien habria tomado. Misma convencion que detect_overnight_gap: iloc[-1]
-    # es la sesion en curso.
-    entry_reject = scoring.check_entry_at_open(
-        float(df["Open"].iloc[-1]), core.stop, core.tp, core.atr, MIN_RR, MIN_ENTRY_RISK_ATR,
+    # v2.12: rango de Open valido para la sesion de entrada (gap + riesgo + R:R real).
+    # Si es vacio, ningun Open posible daria un trade valido -> no alertar.
+    open_lo, open_hi = scoring.entry_open_range(
+        entry, core.stop, core.tp, core.atr, MIN_RR, MIN_ENTRY_RISK_ATR, _gap_block_pct(),
     )
-    if entry_reject:
-        blocked.append(entry_reject)
+    if open_lo > open_hi:
+        blocked.append(
+            f"Sin Open valido posible (rango {open_lo:.2f}-{open_hi:.2f} vacio: gap/riesgo/R:R)"
+        )
 
     if sym_context.get("hard_block_long"):
         blocked.append(f"Bloqueo manual: {sym_context.get('note', 'sin nota')}")
@@ -1521,6 +1574,8 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
         risk_usd=risk_usd,
         trailing_stop_initial=trailing_initial,
         rank_score=round(rank, 2),
+        entry_open_lo=round(open_lo, 2),
+        entry_open_hi=round(open_hi, 2),
     )
 
 
@@ -1563,7 +1618,7 @@ def format_alert(sig: StockSignal, vix: Optional[float]) -> str:
 
     return (
         f"{score_emoji} *ALERTA BOLSA v2.6: {sig.name} ({sig.symbol})*\n\n"
-        f"💰 *Precio:* ${sig.price:.2f}\n"
+        f"💰 *Cierre señal:* ${sig.price:.2f}\n"
         f"📊 *Score:* {sig.score:.1f} | *Rank:* {sig.rank_score:.2f}\n"
         f"⚖️ *R:R estructural:* {sig.rr:.2f}x\n"
         f"📏 *ATR:* ${sig.atr:.2f} | *ADX:* {sig.adx:.1f} | *RSI:* {sig.rsi:.1f}\n"
@@ -1575,7 +1630,9 @@ def format_alert(sig: StockSignal, vix: Optional[float]) -> str:
         f"{rs_line}"
         f"{vix_line}"
         f"{earnings_line}"
-        f"\n🎯 *TARGET:* ${sig.tp:.2f}\n"
+        f"\n🟢 *ENTRADA:* Open de la próxima sesión, solo si abre entre "
+        f"${sig.entry_open_lo:.2f} y ${sig.entry_open_hi:.2f} (fuera de rango: no entrar)\n"
+        f"🎯 *TARGET:* ${sig.tp:.2f}\n"
         f"🛑 *STOP:* ${sig.stop:.2f}"
         f"{sizing_block}\n"
         f"📝 *Confluencias:*\n{confluences}"
@@ -1604,12 +1661,13 @@ def main() -> None:
     log.info("Iniciando escaneo v2.6 [%s] — %s simbolos", mode, len(STOCKS))
     log.info("Historico CSV: %s", ALERTS_HISTORY_FILE)
 
-    tracker_stats = update_alert_history_tracker() if not DRY_RUN else {"open_checked": 0, "hit_target": 0, "hit_stop": 0, "expired": 0, "still_open": 0, "invalid": 0}
+    tracker_stats = update_alert_history_tracker() if not DRY_RUN else {"open_checked": 0, "hit_target": 0, "hit_stop": 0, "expired": 0, "still_open": 0, "invalid": 0, "cancelled": 0}
     if tracker_stats["open_checked"] > 0:
         log.info(
-            "Tracker historico | Revisadas:%s | Target:%s | Stop:%s | Expiradas:%s | Abiertas:%s | Invalidas:%s",
+            "Tracker historico | Revisadas:%s | Target:%s | Stop:%s | Expiradas:%s | Abiertas:%s | Invalidas:%s | Canceladas al Open:%s",
             tracker_stats["open_checked"], tracker_stats["hit_target"], tracker_stats["hit_stop"],
             tracker_stats["expired"], tracker_stats["still_open"], tracker_stats["invalid"],
+            tracker_stats["cancelled"],
         )
         history_rows = load_alert_history_rows()
 
@@ -1634,6 +1692,25 @@ def main() -> None:
     # v2.5 #6: breadth filter — calcular una sola vez para todo el scan
     breadth_pct = compute_market_breadth()
 
+    # v2.12: si la sesion de hoy ya abrio y no cerro, la ultima barra cerrada es la de
+    # ayer y su sesion de entrada (hoy) ya paso el Open: una alerta nueva no seria
+    # ejecutable al precio que registra el tracker. Se actualiza el tracker (arriba) pero
+    # no se emiten alertas; la corrida post-cierre evaluara la barra de hoy.
+    now_ny = datetime.now(timezone.utc).astimezone(MARKET_TZ)
+    session_in_progress = (
+        spy_df is not None
+        and len(closed_bars(spy_df)) < len(spy_df)
+        and (now_ny.hour, now_ny.minute) >= (9, 30)
+    )
+    scan_symbols = STOCKS
+    if session_in_progress and not FORCE_SCAN_DURING_SESSION:
+        log.warning(
+            "Sesion en curso (%s ET): no se emiten alertas nuevas — el scanner opera "
+            "con señal al cierre y entrada al Open siguiente. Correr despues de las 16:%02d ET.",
+            now_ny.strftime("%H:%M"), SESSION_CLOSE_BUFFER_MIN,
+        )
+        scan_symbols = []
+
     stats = {k: 0 for k in ("scanned", "cooldown", "no_data", "blocked", "duplicate", "no_signal", "alerts", "corr_guard", "ranked_skip")}
 
     # ========================================================================
@@ -1641,7 +1718,7 @@ def main() -> None:
     # ========================================================================
     candidates: list[StockSignal] = []
 
-    for symbol in STOCKS:
+    for symbol in scan_symbols:
         last_alert_state = float(state.get(symbol, 0) or 0)
         fallback_last_ts = recent_history_timestamp(symbol, history_rows)
         last_alert = max(last_alert_state, fallback_last_ts)

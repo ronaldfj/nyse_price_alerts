@@ -8,7 +8,7 @@
 ## 1. Identidad del Proyecto
 
 **Nombre:** Stock Sentinel Bot — RGTNYSE  
-**Versión activa:** v2.12 (breakout-only)  
+**Versión activa:** v2.13 (breakout-only, señal al cierre → entrada al Open siguiente)  
 **Objetivo:** Escáner automatizado de acciones con análisis técnico multi-capa, alertas vía Telegram y backtesting reproducible. Corre de forma autónoma en GitHub Actions dos veces al día durante la sesión de NY.
 
 **Stack:**
@@ -83,7 +83,7 @@ analyze_alerts_history.py ← Análisis de performance en vivo
 - Cualquier nuevo indicador debe pasar validación en `validate_ohlcv()` (mínimo 220 barras para warm-up).
 
 **Áreas de riesgo estadístico:**
-- Confluence=5 (5/5 señales): backtested a 28.6% WR, 0.008R (n=7, v2.12). No aumentar el bonus por confluencia alta sin revalidar.
+- Confluence=5 (5/5 señales): backtested a 0% WR, -0.462R (n=4, v2.13). No aumentar el bonus por confluencia alta sin revalidar.
 - Pullback playbook: eliminado en v2.10 por expectancy de 0.009R (21 trades — muestra insuficiente para edge real). Si se reactiva, exigir mínimo 100 trades en backtest.
 - Extension penalty: cuadrática por diseño (no lineal). No simplificar a lineal sin testear impacto en distribución de R.
 
@@ -94,9 +94,11 @@ analyze_alerts_history.py ← Análisis de performance en vivo
 **Fuente de datos:** yfinance (Yahoo Finance) — datos diarios ajustados por splits/dividendos.
 
 **Latencia y scheduling:**
-- Ejecución: 10:12 AM ET (intraday) y 3:12 PM ET (cierre) — lunes a viernes.
+- **v2.13 — señal al cierre, entrada al Open siguiente.** Cron 16:30 ET + 19:30 ET de respaldo (lun–vie). GitHub Actions retrasa los schedules horas y descarta muchos (sep–nov 2026: 1 corrida/día en 35 de 47 días, casi siempre 16:00–21:00 ET; la de 10:12 casi nunca corría) — por eso el esquema tolera cualquier corrida entre el cierre y las 09:30 ET siguientes.
+- `closed_bars()` recorta a barras CERRADAS (la de hoy cuenta desde 16:00 + `SESSION_CLOSE_BUFFER_MIN`). La barra de señal es siempre `iloc[-1]` de ese df; `signals.compute_relative_strength(signal_offset=1)`.
+- Si la sesión está abierta, NO se emiten alertas (la entrada de la señal de ayer ya pasó su Open); el tracker sí corre. `FORCE_SCAN_DURING_SESSION=true` solo para depurar.
+- La alerta informa el rango de Open válido (`scoring.entry_open_range`: gap ≤2%, riesgo ≥0.5 ATR, R:R real ≥ MIN_RR); si el rango es vacío no se alerta. El tracker toma `real_entry` = Open de la sesión siguiente a la señal y, si cae fuera de rango, marca la fila `cancelled` (fuera de métricas; sí cuenta para cooldown, igual que el backtest).
 - `concurrency: cancel-in-progress: true` en el workflow. Crítico para evitar condiciones de carrera en el commit del CSV.
-- GitHub Actions no tiene acceso a datos intraday — el sistema opera sobre barras diarias cerradas.
 
 **Integración Telegram:**
 - Alertas con Markdown (bold, monospace para precios).
@@ -230,20 +232,21 @@ Max hold:            20 barras (TRACKER_MAX_BARS_OPEN)
 
 ---
 
-## 6. Performance Actual (v2.12 — Backtest 3 años con paridad vivo, corrida 2026-11-24)
+## 6. Performance Actual (v2.13 — Backtest 3 años, esquema señal al cierre, corrida 2026-11-24)
 
 | Métrica | Valor |
 |---|---|
-| Expectancy | 0.302R/trade (0.26R post-costos), n=151 |
-| Win Rate | 35.1% hit target / 45.7% con R>0 |
-| Trades/año | ~50 |
-| Max Drawdown | -13.5% cronológico (Monte Carlo p95: -14.5%) |
-| Confluencia=4: WR | 70%, 0.844R (n=20) ← señal de mayor calidad |
-| Confluencia=5: WR | 28.6%, 0.008R (n=7) ← evitar (chasing) |
-| Confluencia=2 | 0.113R (n=25) |
-| Edge 1ra vs 2da mitad (cronológico) | +0.03R → +0.53R — sin degradación |
-| Últimos 20 trades (jun–nov 2026) | -0.28R — dentro de la varianza (ver nota) |
-| Vivo vs backtest (desde 2026-07-10) | vivo -0.256R (n=19) vs backtest -0.238R (n=18) — paridad OK |
+| Expectancy | 0.364R/trade (0.321R post-costos), n=139 |
+| Win Rate | 37.4% hit target / 48.2% con R>0 |
+| Trades/año | ~46 |
+| Max Drawdown | -14.4% cronológico (Monte Carlo p95: -14.9%) |
+| Confluencia=4: WR | 70.6%, 0.876R (n=17) ← señal de mayor calidad |
+| Confluencia=5: WR | 0%, -0.462R (n=4) ← evitar (chasing) |
+| Confluencia=2 | 0.246R (n=25) |
+| Edge 1ra vs 2da mitad (cronológico) | +0.09R → +0.58R — sin degradación |
+| Vivo desde 2026-07-10 | -0.256R (n=19) — `LIVE_EVAL_START` en el workflow |
+
+**v2.13 — cambios vs v2.12:** cooldowns/earnings/post-stop medidos desde la fecha de la señal (la alerta sale esa noche); post-stop sin +1 día (el tracker detecta el stop la misma noche). Earnings en vivo revisa varias fechas (`get_earnings_dates(limit=8)`), no solo la "próxima": con limit=1 la señal del mismo día del reporte pasaba (GS 07-14, MA 07-30, XOM 10-30, los 3 en -1R). Paridad con las alertas históricas: 15/20 con status idéntico 15/15; las 5 restantes son las que v2.13 bloquea (3 por earnings del mismo día, 1 corr guard, 1 cooldown) — las alertas viejas se generaron con el esquema intradía.
 
 **v2.11 — entrada real en backtest:** el stop/target se calculan sobre el cierre de la barra de señal pero la entrada es el Open siguiente. Un gap a la baja ≤2% podía dejar riesgo ~0 o negativo (XLP 2024-08-02: +21R). `scoring.check_entry_at_open()` descarta el trade si `real_entry - stop < MIN_ENTRY_RISK_ATR × ATR` o si el R:R real < `MIN_RR` — lo usan backtest.py **y** alert.py (bloquea la alerta con el Open del día). El stop se ejecuta al Open cuando hay gap-through (backtest y tracker en vivo; R puede ser < -1).
 
@@ -289,6 +292,9 @@ Ante cualquier requerimiento de cambio, aplicar este orden:
 MIN_SCORE=5.8
 MIN_RR=0.8
 MIN_ENTRY_RISK_ATR=0.5   # riesgo mínimo vs Open real (backtest + vivo)
+SESSION_CLOSE_BUFFER_MIN=15   # la barra del día cuenta como cerrada desde 16:15 ET
+FORCE_SCAN_DURING_SESSION=false   # solo depuración
+LIVE_EVAL_START=2026-07-10   # workflow: inicio de la ventana de evaluación en vivo
 COOLDOWN_HOURS=48
 POST_STOP_COOLDOWN_HOURS=72
 

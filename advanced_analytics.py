@@ -47,6 +47,7 @@ class Settings:
     mc_runs: int
     rolling_window_trades: int
     filter_playbook: str = ""
+    start_date: str = ""
 
 
 # ── Carga + normalizacion ───────────────────────────────────────────────────
@@ -341,6 +342,8 @@ def write_report(settings: Settings, df: pd.DataFrame, realized_r: pd.Series,
     lines.append("# Advanced Analytics Report")
     lines.append("")
     lines.append(f"- Archivo: `{settings.input_path}`")
+    if settings.start_date:
+        lines.append(f"- Desde (vela de señal): **{settings.start_date}**")
     lines.append(f"- Trades cerrados: **{len(df)}**")
     lines.append(f"- Capital inicial: **${settings.initial_capital:,.0f}**")
     lines.append(f"- Riesgo por trade: **{settings.risk_per_trade_pct}%**")
@@ -465,6 +468,9 @@ def parse_args() -> Settings:
     p.add_argument("--rolling-window", type=int, default=30)
     p.add_argument("--filter-playbook", type=str, default="",
                    help="Filtrar por playbook: 'breakout', 'pullback', 'hybrid', o vacio (todos)")
+    p.add_argument("--start-date", type=str, default="",
+                   help="Solo trades con vela de señal >= YYYY-MM-DD (p.ej. excluir alertas "
+                        "en vivo generadas por versiones anteriores del motor)")
     args = p.parse_args()
 
     return Settings(
@@ -477,6 +483,7 @@ def parse_args() -> Settings:
         mc_runs=args.mc_runs,
         rolling_window_trades=args.rolling_window,
         filter_playbook=args.filter_playbook.strip().lower(),
+        start_date=args.start_date.strip(),
     )
 
 
@@ -488,6 +495,18 @@ def main() -> None:
     if df.empty:
         log.warning("Sin trades cerrados — no se puede analizar")
         return
+
+    # v2.12: ventana de evaluacion por fecha de la vela de señal
+    if settings.start_date:
+        col = "trigger_candle_utc" if "trigger_candle_utc" in df.columns else "timestamp_utc"
+        start = pd.Timestamp(settings.start_date, tz="UTC")
+        sig_dt = pd.to_datetime(df[col], utc=True, errors="coerce")
+        before = len(df)
+        df = df[sig_dt >= start].reset_index(drop=True)
+        log.info("Filtro start-date >= %s: %s/%s trades", settings.start_date, len(df), before)
+        if df.empty:
+            log.warning("Sin trades desde %s — no se puede analizar", settings.start_date)
+            return
 
     # Filtro por playbook (Fase B)
     if settings.filter_playbook:

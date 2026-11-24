@@ -184,9 +184,14 @@ def compute_relative_strength(
     spy_df: Optional[pd.DataFrame],
     lookback: int = RS_LOOKBACK_DEFAULT,
     symbol: str = "",
+    signal_offset: int = 2,
 ) -> float:
     """
     Calcula la diferencia de retornos entre el activo y SPY en `lookback` sesiones.
+
+    signal_offset: posicion de la barra de señal desde el final (iloc[-signal_offset]).
+    2 = la ultima barra esta en formacion (convencion historica); 1 = df ya contiene
+    solo barras cerradas (v2.12, alert.py corre tras el cierre).
     Devuelve 0.0 si no hay datos suficientes o no se pueden alinear.
 
     v2.5 Fix #2: alineacion temporal por interseccion de indices — evita errores
@@ -201,7 +206,7 @@ def compute_relative_strength(
     para que el resultado no dependa de que fetch_data() haya usado descarga
     individual o batch para cada uno.
     """
-    if spy_df is None or len(df) < lookback + 2 or len(spy_df) < lookback + 2:
+    if spy_df is None or len(df) < lookback + signal_offset or len(spy_df) < lookback + signal_offset:
         return 0.0
 
     asset_close = df["Close"]
@@ -212,7 +217,7 @@ def compute_relative_strength(
         spy_close = spy_close.tz_localize(None)
 
     common_idx = asset_close.index.intersection(spy_close.index)
-    if len(common_idx) < lookback + 2:
+    if len(common_idx) < lookback + signal_offset:
         log.warning(
             "%s: RS sin overlap suficiente vs SPY pese a tener historia de sobra "
             "(asset=%s barras, spy=%s barras, comunes=%s) — posible mismatch de "
@@ -226,21 +231,21 @@ def compute_relative_strength(
 
     # Re-intersectar tras dropna: un NaN en posiciones distintas reduce el universo comun
     valid_idx = asset_aligned.index.intersection(spy_aligned.index)
-    if len(valid_idx) < lookback + 2:
+    if len(valid_idx) < lookback + signal_offset:
         return 0.0
 
     asset_aligned = asset_aligned.loc[valid_idx]
     spy_aligned = spy_aligned.loc[valid_idx]
 
-    asset_base = float(asset_aligned.iloc[-2 - lookback])
-    spy_base = float(spy_aligned.iloc[-2 - lookback])
+    asset_base = float(asset_aligned.iloc[-signal_offset - lookback])
+    spy_base = float(spy_aligned.iloc[-signal_offset - lookback])
 
     # Guard contra precios cero o negativos (datos corruptos)
     if asset_base <= 0.0 or spy_base <= 0.0:
         return 0.0
 
-    asset_ret = (float(asset_aligned.iloc[-2]) / asset_base - 1.0) * 100
-    spy_ret = (float(spy_aligned.iloc[-2]) / spy_base - 1.0) * 100
+    asset_ret = (float(asset_aligned.iloc[-signal_offset]) / asset_base - 1.0) * 100
+    spy_ret = (float(spy_aligned.iloc[-signal_offset]) / spy_base - 1.0) * 100
     return round(asset_ret - spy_ret, 2)
 
 

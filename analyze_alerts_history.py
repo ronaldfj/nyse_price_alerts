@@ -32,6 +32,7 @@ class Settings:
     input_path: Path
     outdir: Path
     min_closed: int = 10
+    start_date: str = ""
 
 
 NUMERIC_COLS = [
@@ -406,13 +407,21 @@ def parse_args() -> Settings:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", default=DEFAULT_INPUT, help="Ruta a alerts_history.csv")
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR, help="Carpeta de salida")
+    parser.add_argument("--start-date", default="",
+                        help="Solo alertas con vela de señal >= YYYY-MM-DD")
     args = parser.parse_args()
-    return Settings(input_path=Path(args.input), outdir=Path(args.outdir))
+    return Settings(input_path=Path(args.input), outdir=Path(args.outdir),
+                    start_date=args.start_date.strip())
 
 
 def main() -> None:
     settings = parse_args()
     raw_df = load_history(settings.input_path)
+    # v2.12: ventana de evaluacion (excluye alertas de versiones anteriores del motor)
+    if settings.start_date and "trigger_candle_utc" in raw_df.columns:
+        sig_dt = pd.to_datetime(raw_df["trigger_candle_utc"], utc=True, errors="coerce")
+        raw_df = raw_df[sig_dt >= pd.Timestamp(settings.start_date, tz="UTC")].reset_index(drop=True)
+        print(f"Filtro start-date >= {settings.start_date}: {len(raw_df)} alertas")
     df = add_derived_columns(raw_df)
     df_closed = closed_only(df)
 

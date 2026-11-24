@@ -156,9 +156,9 @@ ALERT_ETFS               = os.getenv("ALERT_ETFS", "false").lower() == "true"
 # dias calendario entre la fecha de corrida (barra i) de una alerta y la siguiente — asi
 # un fin de semana cuenta igual que en produccion.
 COOLDOWN_DAYS           = float(os.getenv("COOLDOWN_HOURS", "48")) / 24.0
-# El tracker detecta el stop en la primera corrida posterior al cierre de la barra de
-# salida (exit_date + 1), y el post-stop cooldown corre desde esa deteccion.
-POST_STOP_COOLDOWN_DAYS = float(os.getenv("POST_STOP_COOLDOWN_HOURS", "72")) / 24.0 + 1.0
+# Con el scanner corriendo tras el cierre, el tracker detecta el stop la noche misma de
+# la barra de salida, y el post-stop cooldown corre desde esa fecha.
+POST_STOP_COOLDOWN_DAYS = float(os.getenv("POST_STOP_COOLDOWN_HOURS", "72")) / 24.0
 POST_STOP_SCORE_PENALTY = float(os.getenv("POST_STOP_SCORE_PENALTY", "1.0"))
 MAX_BARS_HOLD       = int(os.getenv("BT_MAX_BARS_HOLD", os.getenv("TRACKER_MAX_BARS_OPEN", "20")))  # time-stop
 REQUIRE_PLAYBOOK    = True
@@ -531,9 +531,10 @@ def backtest_symbol(
                 d = d.tz_localize("UTC")
             vix_map[d.date().isoformat()] = float(row["Close"])
 
-    # Convencion de indices (igual que alert.py corriendo el dia i):
-    #   i-1 = barra de señal (ultima cerrada, alert.py iloc[-2])
-    #   i   = dia de la corrida; la orden se ejecuta a su Open (alert.py iloc[-1])
+    # Convencion de indices — v2.12 esquema "señal al cierre, entrada al Open siguiente":
+    #   i-1 = barra de señal; alert.py corre despues del cierre de esa sesion (su
+    #         ultima barra cerrada) y emite la alerta esa noche
+    #   i   = sesion de entrada; la orden se ejecuta a su Open
     for i in range(220, len(df)):
         bar_dt = pd.Timestamp(df.index[i-1])
         if bar_dt.tzinfo is None:
@@ -543,7 +544,9 @@ def backtest_symbol(
         if start_date is not None and bar_dt < start_date:
             continue
 
-        run_date = pd.Timestamp(df.index[i]).date()
+        # La alerta se emite la noche de la barra de señal: cooldowns y earnings se miden
+        # desde esa fecha, igual que el reloj del vivo.
+        run_date = pd.Timestamp(df.index[i - 1]).date()
 
         # Cooldown entre alertas del mismo simbolo (alert.py: COOLDOWN_HOURS)
         if last_run_date is not None and (run_date - last_run_date).days < COOLDOWN_DAYS:
@@ -559,7 +562,7 @@ def backtest_symbol(
                 continue
 
         # v2.12: earnings (alert.py: get_earnings_info). Bloquea si el proximo reporte
-        # cae dentro de EARNINGS_BUFFER_DAYS dias calendario desde el dia de la corrida.
+        # cae dentro de EARNINGS_BUFFER_DAYS dias calendario desde la noche de la señal.
         if earnings_dates and any(0 <= (e - run_date).days <= EARNINGS_BUFFER_DAYS for e in earnings_dates):
             continue
 
@@ -575,25 +578,33 @@ def backtest_symbol(
         if past_stops and sig["score"] < MIN_SCORE + POST_STOP_SCORE_PENALTY:
             continue
 
+        # alert.py no emite la alerta si no existe ningun Open valido (rango vacio)
+        lo, hi = scoring.entry_open_range(
+            sig["entry"], sig["stop"], sig["target"], sig["atr"],
+            MIN_RR, MIN_ENTRY_RISK_ATR, GAP_BLOCK_PCT,
+        )
+        if lo > hi:
+            continue
+
         # v2.12 FIX: la barra de señal es i-1 (evaluate_bar usa last = df.iloc[i-1]).
         # Antes se pasaba i, y simulate_trade entraba en i+1: un dia TARDE respecto del
         # vivo (que compra el Open del dia siguiente a la señal), salteando la primera
         # sesion del trade y midiendo el gap contra la apertura equivocada.
         outcome = simulate_trade(df, i - 1, sig["entry"], sig["target"], sig["stop"], sig.get("playbook", ""))
 
-        # v2.9: descartar trades sin entrada efectiva o con gap excesivo
+        # v2.9: descartar trades sin entrada efectiva
         if outcome["status"] == "no_entry":
             continue
 
-        # v2.9 Fix #8: filtro de gap aplicado al precio real de entrada
-        real_entry = outcome.get("real_entry", sig["entry"])
-        gap_pct = abs((real_entry - sig["entry"]) / max(sig["entry"], 1e-9)) * 100.0
-        if gap_pct > GAP_BLOCK_PCT:  # mismo umbral que GAP_BLOCK_PCT del live
-            continue
+        # En vivo la alerta ya se emitio (y seteo cooldown) aunque el Open luego la cancele.
+        last_run_date = run_date
 
-        # v2.11: revalidar riesgo y R:R contra la entrada real (mismo helper que alert.py)
+        # Gap + riesgo + R:R contra el Open real — mismo helper que el tracker de alert.py,
+        # que marca la alerta como "cancelled" si el Open cae fuera de rango.
+        real_entry = outcome.get("real_entry", sig["entry"])
         if scoring.check_entry_at_open(
-            real_entry, sig["stop"], sig["target"], sig["atr"], MIN_RR, MIN_ENTRY_RISK_ATR,
+            real_entry, sig["entry"], sig["stop"], sig["target"], sig["atr"],
+            MIN_RR, MIN_ENTRY_RISK_ATR, GAP_BLOCK_PCT,
         ):
             continue
 
@@ -658,7 +669,6 @@ def backtest_symbol(
         }
 
         trades.append(row)
-        last_run_date = run_date
         if outcome["status"] == "hit_stop":
             stop_exit_bars.append(outcome["exit_bar"])
 
