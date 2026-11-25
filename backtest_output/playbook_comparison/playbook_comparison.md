@@ -9,26 +9,26 @@
 
 | playbook   |   n |   win_rate_pct |   expectancy |   expectancy_with_costs |   max_drawdown_pct |   mc_worst_drawdown |   mc_prob_profit_pct |   rolling_sharpe_avg |   edge_degradation |
 |:-----------|----:|---------------:|-------------:|------------------------:|-------------------:|--------------------:|---------------------:|---------------------:|-------------------:|
-| all        | 151 |           45.7 |        0.302 |                    0.26 |              -13.5 |              -14.78 |                99.15 |                 0.18 |              0.504 |
-| breakout   | 151 |           45.7 |        0.302 |                    0.26 |              -13.5 |              -14.78 |                99.15 |                 0.18 |              0.504 |
-| pullback   |   0 |          nan   |      nan     |                  nan    |              nan   |              nan    |               nan    |               nan    |            nan     |
-| hybrid     |   0 |          nan   |      nan     |                  nan    |              nan   |              nan    |               nan    |               nan    |            nan     |
+| all        | 139 |           48.2 |        0.364 |                   0.321 |             -14.36 |              -15.09 |                 99.6 |                0.207 |               0.49 |
+| breakout   | 139 |           48.2 |        0.364 |                   0.321 |             -14.36 |              -15.09 |                 99.6 |                0.207 |               0.49 |
+| pullback   |   0 |          nan   |      nan     |                 nan     |             nan    |              nan    |                nan   |              nan     |             nan    |
+| hybrid     |   0 |          nan   |      nan     |                 nan     |             nan    |              nan    |                nan   |              nan     |             nan    |
 
 ## Distribucion de R
 
-| playbook   |   n |   median_r |   std_r |   skew |   min_r |   p05_r |   p95_r |   max_r |
-|:-----------|----:|-----------:|--------:|-------:|--------:|--------:|--------:|--------:|
-| all        | 151 |     -0.236 |   1.469 |   0.71 |  -1.593 |   -1.09 |   2.831 |    4.67 |
-| breakout   | 151 |     -0.236 |   1.469 |   0.71 |  -1.593 |   -1.09 |   2.831 |    4.67 |
-| pullback   |   0 |    nan     | nan     | nan    | nan     |  nan    | nan     |  nan    |
-| hybrid     |   0 |    nan     | nan     | nan    | nan     |  nan    | nan     |  nan    |
+| playbook   |   n |   median_r |   std_r |    skew |   min_r |   p05_r |   p95_r |   max_r |
+|:-----------|----:|-----------:|--------:|--------:|--------:|--------:|--------:|--------:|
+| all        | 139 |     -0.184 |   1.573 |   0.388 |  -4.124 |  -1.094 |   2.933 |    4.67 |
+| breakout   | 139 |     -0.184 |   1.573 |   0.388 |  -4.124 |  -1.094 |   2.933 |    4.67 |
+| pullback   |   0 |    nan     | nan     | nan     | nan     | nan     | nan     |  nan    |
+| hybrid     |   0 |    nan     | nan     | nan     | nan     | nan     | nan     |  nan    |
 
 ## Equity Curve + Monte Carlo
 
 | playbook   |   final_capital |   total_return_pct |   mc_median_capital |   mc_p05_capital |   mc_p95_capital |   mc_median_drawdown |   mc_max_consec_losses_p95 |
 |:-----------|----------------:|-------------------:|--------------------:|-----------------:|-----------------:|---------------------:|---------------------------:|
-| all        |           15528 |              55.28 |             15534.2 |          11541.3 |          20915.7 |                -8.39 |                         11 |
-| breakout   |           15528 |              55.28 |             15534.2 |          11541.3 |          20915.7 |                -8.39 |                         11 |
+| all        |           16285 |              62.85 |             16120.2 |          12077.6 |          21955.9 |                -8.63 |                         10 |
+| breakout   |           16285 |              62.85 |             16120.2 |          12077.6 |          21955.9 |                -8.63 |                         10 |
 | pullback   |             nan |             nan    |               nan   |            nan   |            nan   |               nan    |                        nan |
 | hybrid     |             nan |             nan    |               nan   |            nan   |            nan   |               nan    |                        nan |
 
