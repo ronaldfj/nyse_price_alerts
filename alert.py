@@ -119,6 +119,7 @@ import csv
 import hashlib
 import json
 import logging
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1518,9 +1519,16 @@ def evaluate_stock(symbol: str, sym_context: dict, vix: Optional[float], spy_df:
 
     # v2.12: rango de Open valido para la sesion de entrada (gap + riesgo + R:R real).
     # Si es vacio, ningun Open posible daria un trade valido -> no alertar.
+    # Se calcula con los MISMOS valores que el tracker leera del CSV (entry a 4
+    # decimales; stop/target/ATR redondeados a 2 en StockSignal) y se publica
+    # redondeado HACIA ADENTRO al centavo con 1 centavo de margen. Antes: round() sobre
+    # valores sin redondear -> un Open justo en el borde publicado se cancelaba.
     open_lo, open_hi = scoring.entry_open_range(
-        entry, core.stop, core.tp, core.atr, MIN_RR, MIN_ENTRY_RISK_ATR, _gap_block_pct(),
+        round(entry, 4), round(core.stop, 2), round(core.tp, 2), round(core.atr, 2),
+        MIN_RR, MIN_ENTRY_RISK_ATR, _gap_block_pct(),
     )
+    open_lo = math.floor(open_lo * 100) / 100 + 0.01
+    open_hi = math.ceil(open_hi * 100) / 100 - 0.01
     if open_lo > open_hi:
         blocked.append(
             f"Sin Open valido posible (rango {open_lo:.2f}-{open_hi:.2f} vacio: gap/riesgo/R:R)"
