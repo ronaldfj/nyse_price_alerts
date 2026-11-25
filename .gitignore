@@ -1,2 +1,5 @@
 .venv/
 venv/
+.codebase-memory/
+crypto_inspector.py
+docs/
